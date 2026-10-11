@@ -116,8 +116,8 @@ PAGE = """<!DOCTYPE html>
   </div>
 </div>
 <header>
-  <h1 id="ssid">WiFi dhoondh rahe hain...</h1>
-  <p class="sub" id="sub">Ye list us WiFi ki hai jisse ye computer abhi juda hai.</p>
+  <h1>Connected devices</h1>
+  <p class="sub">Is network ke connected devices.</p>
   <div class="actions">
     <button id="scan" class="primary" type="button">Scan abhi</button>
   </div>
@@ -125,7 +125,6 @@ PAGE = """<!DOCTYPE html>
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
   <div id="status">Scan shuru ho raha hai</div>
-  <div id="net"></div>
 </div>
 <div id="err"></div>
 <div id="alert"></div>
@@ -139,8 +138,6 @@ PAGE = """<!DOCTYPE html>
   <div class="empty" id="empty">Scan chal raha hai.</div>
 </div>
 <script>
-const ssidEl = document.getElementById("ssid");
-const subEl = document.getElementById("sub");
 const rowsEl = document.getElementById("rows");
 const emptyEl = document.getElementById("empty");
 const alertEl = document.getElementById("alert");
@@ -206,15 +203,10 @@ async function tick() {
   const devices = data.devices || [];
   document.getElementById("count").textContent = String(devices.length);
   document.getElementById("err").textContent = data.error || data.warning || "";
-  document.getElementById("net").textContent = data.my_ip ? ("Mera IP " + data.my_ip + "   " + (data.net || "")) : "";
   if (!data.connected) {
-    ssidEl.textContent = "WiFi se connected nahi";
-    subEl.textContent = "Is computer ko us area ke WiFi se jodo. Phir yahi page us WiFi ke saare devices dikhayegi.";
-    emptyEl.textContent = "WiFi connect karo, phir Scan abhi dabao.";
+    emptyEl.textContent = "Abhi scan available nahi.";
   } else {
-    ssidEl.textContent = data.ssid || "WiFi naam nahi mila";
-    subEl.textContent = "Is WiFi se jitne devices connected hain, woh neeche hain.";
-    emptyEl.textContent = data.scanning ? "Scan chal raha hai." : "Is WiFi pe koi device nahi mila.";
+    emptyEl.textContent = data.scanning ? "Scan chal raha hai." : "Koi device nahi mila.";
   }
   if (data.scanning) document.getElementById("status").textContent = "Scan ho raha hai...";
   else if (data.updated) {
@@ -223,7 +215,7 @@ async function tick() {
   }
   if (typeof data.generation === "number" && data.generation !== seenGen) {
     if (seenGen !== -1 && data.connected) {
-      alertEl.textContent = "WiFi badal gaya. Ab is network ke " + devices.length + " devices dikh rahe hain.";
+      alertEl.textContent = "List update ho gayi. Devices: " + devices.length;
       alertEl.classList.add("show");
     }
     seenGen = data.generation;
@@ -269,7 +261,8 @@ gate.addEventListener("click", (event) => { if (event.target === gate) closeGate
 
 function paintNetworks(data) {
   gateList.textContent = "";
-  gateList.appendChild(el("div", "Scanner " + (data.scanner_mac || "—") + "   " + (data.my_ip || ""), "iface"));
+  document.getElementById("gateTitle").textContent = data.ssid || "Server ka WiFi";
+  gateList.appendChild(el("div", [data.my_ip, data.scanner_mac].filter(Boolean).join("   "), "iface"));
   const nets = data.networks || [];
   gateList.appendChild(el("h2", "WiFi"));
   if (!nets.length) {
@@ -310,7 +303,6 @@ gateForm.addEventListener("submit", async (event) => {
     }
     gateMsg.textContent = "";
     gateForm.hidden = true;
-    document.getElementById("gateTitle").textContent = "Is computer ke network";
     paintNetworks(data);
   } catch (e) {
     gateMsg.textContent = "Server se connection nahi";
@@ -764,7 +756,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
         elif path == "/api/state":
-            self._send(200, "application/json; charset=utf-8", json.dumps(self.radar.snapshot()))
+            snap = self.radar.snapshot()
+            for key in ("ssid", "my_ip", "net"):
+                snap.pop(key, None)
+            self._send(200, "application/json; charset=utf-8", json.dumps(snap))
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
