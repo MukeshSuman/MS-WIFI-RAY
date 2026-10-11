@@ -85,6 +85,11 @@ PAGE = """<!DOCTYPE html>
     width: min(440px, 100%); margin: 0 0 0 auto; background: #1b2119;
     border: 1px solid #3d4d38; border-radius: 14px; padding: 16px;
   }
+  .sheet.wide {
+    width: min(1080px, 100%); max-height: calc(100vh - 88px); overflow: auto;
+  }
+  .sheet .panel { margin: 12px 0 0; }
+  .sheet .sub { margin: 0; }
   .sheet h2 { margin: 0 0 12px; font-size: 18px; color: #e7f0df; }
   .sheet input {
     width: 100%; margin-bottom: 10px; background: #121611; color: #e7f0df;
@@ -291,8 +296,13 @@ const gateCode = document.getElementById("gateCode");
 let dotClicks = 0;
 let dotAt = 0;
 
+function sheet() {
+  return document.querySelector("#gate .sheet");
+}
+
 function openGate() {
   gate.classList.add("show");
+  sheet().classList.remove("wide");
   gateList.textContent = "";
   gateMsg.textContent = "";
   gateForm.hidden = false;
@@ -303,6 +313,7 @@ function openGate() {
 
 function closeGate() {
   gate.classList.remove("show");
+  sheet().classList.remove("wide");
 }
 
 document.getElementById("dot").addEventListener("click", () => {
@@ -319,35 +330,53 @@ gate.addEventListener("click", (event) => { if (event.target === gate) closeGate
 
 function paintNetworks(data) {
   gateList.textContent = "";
-  document.getElementById("gateTitle").textContent = data.ssid || "Server ka WiFi";
-  gateList.appendChild(el("div", [data.my_ip, data.scanner_mac].filter(Boolean).join("   "), "iface"));
-  const nets = data.networks || [];
-  gateList.appendChild(el("h2", "WiFi"));
-  if (!nets.length) {
-    gateList.appendChild(el("div", "Is computer pe WiFi list nahi mili.", "iface"));
-  }
-  nets.forEach((item) => {
-    const box = el("div", null, "wifi");
-    const title = el("b", item.ssid || "—", item.current ? "on" : "");
-    box.appendChild(title);
-    const bits = [];
-    if (item.current) bits.push("abhi juda hai");
-    if (item.signal) bits.push(item.signal);
-    if (item.security) bits.push(item.security);
-    box.appendChild(el("span", bits.join("   ")));
-    gateList.appendChild(box);
-  });
-  gateList.appendChild(el("h2", "Network"));
-  (data.interfaces || []).forEach((item) => {
-    gateList.appendChild(el("div", [item.name, item.ip, item.mac].filter(Boolean).join("   "), "iface"));
-  });
+  sheet().classList.add("wide");
+  document.getElementById("gateTitle").textContent = "Internal";
   const own = data.server_devices || [];
-  if (own.length) {
-    gateList.appendChild(el("h2", "Deploy system ke devices"));
-    own.forEach((item) => {
-      gateList.appendChild(el("div", [item.ip, item.mac, item.hostname || item.name || ""].filter(Boolean).join("   "), "iface"));
-    });
-  }
+  gateList.appendChild(el("p", "Devices " + own.length + (data.ssid ? "   " + data.ssid : ""), "sub"));
+  const panel = el("div", null, "panel");
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const hr = document.createElement("tr");
+  ["IP", "MAC", "Vendor", "Type", "Hostname", "Ports", "Naam"].forEach((name) => hr.appendChild(el("th", name)));
+  head.appendChild(hr);
+  const body = document.createElement("tbody");
+  own.forEach((d) => {
+    const tr = el("tr", null, "c" + (d.color || 0));
+    ["ip", "mac", "vendor", "type", "hostname"].forEach((field) => tr.appendChild(el("td", d[field] || "")));
+    tr.appendChild(el("td", (d.ports || []).join(",")));
+    const nameTd = el("td");
+    if (!d.mac || d.mac === "?" || d.mac === "-" || d.name === "Ye computer") {
+      nameTd.appendChild(el("span", d.name || "", d.name === "NEW" ? "new" : ""));
+    } else {
+      const box = el("div", null, "namebox");
+      const input = document.createElement("input");
+      input.value = d.name === "NEW" ? "" : (d.name || "");
+      input.placeholder = d.name === "NEW" ? "NEW" : "naam";
+      input.setAttribute("aria-label", "Device ka naam");
+      const btn = el("button", "Save");
+      btn.type = "button";
+      btn.addEventListener("click", () => saveInternal(d.mac, input.value));
+      box.appendChild(input);
+      box.appendChild(btn);
+      nameTd.appendChild(box);
+    }
+    tr.appendChild(nameTd);
+    body.appendChild(tr);
+  });
+  table.appendChild(head);
+  table.appendChild(body);
+  panel.appendChild(table);
+  if (!own.length) panel.appendChild(el("div", "Is system ka scan abhi nahi aaya.", "empty"));
+  gateList.appendChild(panel);
+}
+
+async function saveInternal(mac, name) {
+  await fetch("/api/name", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mac: mac, name: name })
+  });
 }
 
 gateForm.addEventListener("submit", async (event) => {
