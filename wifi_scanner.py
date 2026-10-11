@@ -127,6 +127,74 @@ def local_ip():
         s.close()
 
 
+def wifi_device():
+    """Mac ke Wi-Fi hardware port ka interface, jaise en0. Menu bar yahi dikhata hai."""
+    if SYSTEM != "Darwin":
+        return ""
+    try:
+        out = subprocess.run(["networksetup", "-listallhardwareports"], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return "en0"
+    pending = False
+    for line in out.splitlines():
+        if line.startswith("Hardware Port:"):
+            port = line.split(":", 1)[1].strip().lower()
+            pending = port in ("wi-fi", "wifi", "airport")
+        elif pending and line.startswith("Device:"):
+            return line.split(":", 1)[1].strip() or "en0"
+    return "en0"
+
+
+def _iface_ipv4(iface):
+    if not iface or not IFACE_OK.fullmatch(iface):
+        return ""
+    try:
+        out = subprocess.run(["ifconfig", iface], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return ""
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "inet" and not parts[1].startswith("127."):
+            return parts[1]
+    return ""
+
+
+def wifi_ipv4():
+    if SYSTEM != "Darwin":
+        return ""
+    return _iface_ipv4(wifi_device())
+
+
+def lan_ip():
+    """Scan us Wi-Fi ka hoga jo menu mein connected hai, default route ka nahi."""
+    return wifi_ipv4() or local_ip()
+
+
+def wifi_ssid():
+    if SYSTEM != "Darwin":
+        return ""
+    iface = wifi_device()
+    if not IFACE_OK.fullmatch(iface):
+        iface = "en0"
+    try:
+        out = subprocess.run(["ipconfig", "getsummary", iface], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        out = ""
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SSID") and not stripped.startswith("BSSID") and ":" in stripped:
+            name = stripped.split(":", 1)[1].strip()
+            if name and name not in ("<redacted>", "(null)"):
+                return name
+    try:
+        out = subprocess.run(["networksetup", "-getairportnetwork", iface], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return ""
+    if ":" in out and "not associated" not in out.lower():
+        return out.split(":", 1)[1].strip()
+    return ""
+
+
 _scanner_mac_cache = {}
 
 
@@ -221,7 +289,7 @@ def _mac_windows(ip):
 
 def scanner_mac():
     """Jis computer se scan ho raha hai, us interface ka MAC."""
-    ip = local_ip()
+    ip = lan_ip()
     cached = _scanner_mac_cache.get(ip)
     if cached:
         return cached
@@ -412,7 +480,7 @@ def guess_type(vendor, ports, mac):
 def scan_once(subnet=None, no_ports=False, online=False, announce=False):
     """Ek baar scan. Rows wahi shape mein jo CLI table dikhata hai."""
     known = load_store("known_devices")
-    my_ip = local_ip()
+    my_ip = lan_ip()
     net = ipaddress.ip_network(subnet or f"{my_ip}/24", strict=False)
     if net.num_addresses > 1024:
         raise ValueError("Subnet bahut bada hai, /24 use karo (jaise 192.168.1.0/24).")
@@ -437,10 +505,12 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False):
     with ThreadPoolExecutor(max_workers=50) as ex:
         info = {ip: (h, p) for ip, h, p in ex.map(details, ips)}
 
+    arp.update(read_arp(net))
+    own_mac = scanner_mac()
     cache = load_store("vendor_cache")
     rows, new_count = [], 0
     for ip in ips:
-        mac = arp.get(ip, "-" if ip == my_ip else "?")
+        mac = arp.get(ip) or (own_mac if ip == my_ip else "?")
         host, ports = info[ip]
         vendor = vendor_of(mac, online, cache)
         name = "Ye computer" if ip == my_ip else known.get(mac, "")

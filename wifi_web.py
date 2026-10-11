@@ -332,15 +332,7 @@ def wifi_name():
     system = wifi_scanner.SYSTEM
     try:
         if system == "Darwin":
-            iface = "en0"
-            route = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True, timeout=3).stdout
-            for line in route.splitlines():
-                if "interface:" in line:
-                    iface = line.split(":", 1)[1].strip() or iface
-                    break
-            out = subprocess.run(["networksetup", "-getairportnetwork", iface], capture_output=True, text=True, timeout=3).stdout
-            if ":" in out and "not associated" not in out.lower():
-                return out.split(":", 1)[1].strip()
+            return wifi_scanner.wifi_ssid()
         elif system == "Linux":
             return linux_ssid()
         elif system == "Windows":
@@ -650,7 +642,7 @@ class Radar:
     def loop(self):
         while True:
             ssid = wifi_name()
-            my_ip = wifi_scanner.local_ip()
+            my_ip = wifi_scanner.lan_ip()
             warning = docker_bridge_warning(my_ip)
             if my_ip.startswith("127.") or warning:
                 with self.lock:
