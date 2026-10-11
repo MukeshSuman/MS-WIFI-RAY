@@ -29,6 +29,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -549,10 +551,22 @@ def report_scan(url, result, token):
         "devices": result.get("rows") or [],
     }
     body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as response:
-        if response.status >= 300:
-            raise ValueError("site ne %s diya" % response.status)
+    parts = urllib.parse.urlparse(url)
+    origin = "%s://%s" % (parts.scheme, parts.netloc)
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": origin,
+        "Referer": origin + "/",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            if response.status >= 300:
+                raise ValueError("site ne %s diya" % response.status)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(240).decode("utf-8", "replace").replace("\n", " ").strip()
+        raise ValueError("site ne %s diya. %s" % (exc.code, detail))
     print(f"Report gaya: {payload['ssid'] or payload['net']} -> {url}")
 
 
@@ -582,7 +596,7 @@ def main():
                     help="deployed site, jaise https://wifi.msuman.in")
     ap.add_argument("--token", default=os.environ.get("WIFI_INGEST_TOKEN", "9199"),
                     help="report token")
-    ap.add_argument("--web", action="store_true", help="website: reports dikhata hai, khud ka LAN nahi")
+    ap.add_argument("--web", action="store_true", help="website: isi computer ke WiFi ki list khud dikhata hai")
     ap.add_argument("--host", default="0.0.0.0", help="web bind (default 0.0.0.0, usi WiFi ke devices khol sakein)")
     ap.add_argument("--port", type=int, default=8765, help="web port (default 8765)")
     ap.add_argument("--interval", type=int, default=20, help="web rescan seconds (default 20)")

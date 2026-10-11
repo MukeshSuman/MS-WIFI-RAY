@@ -117,11 +117,11 @@ PAGE = """<!DOCTYPE html>
 </div>
 <header>
   <h1 id="ssid">Connected devices</h1>
-  <p class="sub" id="sub">Jis WiFi se connected ho, us computer pe scanner chalao. Ye page usi ki list dikhata hai.</p>
+  <p class="sub" id="sub">Ye page isi computer ke WiFi ki list khud dikhata hai.</p>
 </header>
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
-  <div id="status">Scan shuru ho raha hai</div>
+  <div id="status">Scan ho raha hai...</div>
 </div>
 <div id="err"></div>
 <div id="alert"></div>
@@ -142,6 +142,7 @@ const emptyEl = document.getElementById("empty");
 const alertEl = document.getElementById("alert");
 let tableKey = "";
 let seenGen = -1;
+let stateFrom = "";
 
 function el(tag, text, cls) {
   const n = document.createElement(tag);
@@ -182,7 +183,8 @@ function render(devices) {
 }
 
 async function saveName(mac, name) {
-  await fetch("/api/name", {
+  const url = stateFrom || "/api/name";
+  await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mac: mac, name: name })
@@ -191,10 +193,29 @@ async function saveName(mac, name) {
   tick();
 }
 
+async function localState() {
+  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 800);
+  try {
+    const res = await fetch("http://127.0.0.1:8765/api/state", { cache: "no-store", signal: ctrl.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && (data.connected || (data.devices || []).length)) return data;
+  } catch (e) {
+  } finally {
+    clearTimeout(timer);
+  }
+  return null;
+}
+
 async function tick() {
   let data;
+  stateFrom = "";
   try {
-    data = await (await fetch("/api/state")).json();
+    data = await localState();
+    if (data) stateFrom = "http://127.0.0.1:8765/api/name";
+    else data = await (await fetch("/api/state")).json();
   } catch (e) {
     document.getElementById("status").textContent = "Server se connection nahi";
     return;
@@ -204,17 +225,18 @@ async function tick() {
   document.getElementById("err").textContent = data.error || data.warning || "";
   if (data.ssid) {
     ssidEl.textContent = data.ssid;
-    subEl.textContent = "Is WiFi ke connected devices. Deploy wale system ki list yahan nahi hai.";
+    subEl.textContent = "Is WiFi ke connected devices.";
   } else {
     ssidEl.textContent = "Connected devices";
-    subEl.textContent = "Jis WiFi se connected ho, us computer pe scanner chalao. Ye page usi ki list dikhata hai.";
+    subEl.textContent = "Ye page isi computer ke WiFi ki list khud dikhata hai.";
   }
   if (!data.connected) {
-    emptyEl.textContent = "Is WiFi ka scan abhi nahi aaya.";
+    emptyEl.textContent = "Is computer ka WiFi scan abhi shuru nahi hua.";
   } else {
     emptyEl.textContent = data.scanning ? "Scan chal raha hai." : "Koi device nahi mila.";
   }
   if (data.scanning) document.getElementById("status").textContent = "Scan ho raha hai...";
+  else if (!data.updated) document.getElementById("status").textContent = "Scan ka intezar";
   else if (data.updated) {
     const ago = Math.max(0, Math.round(Date.now() / 1000 - data.updated));
     document.getElementById("status").textContent = "Aakhri scan " + ago + "s pehle";
@@ -811,12 +833,32 @@ def clean_report(data):
     }
 
 
+def public_mode():
+    mode = os.environ.get("WIFI_PUBLIC", "").strip().lower()
+    if mode in ("live", "radar", "here"):
+        return "live"
+    if mode in ("inbox", "report"):
+        return "inbox"
+    if os.path.exists("/.dockerenv"):
+        return "inbox"
+    return "live"
+
+
 class Handler(BaseHTTPRequestHandler):
     radar = None
     inbox = None
+    public_mode = "live"
 
     def log_message(self, fmt, *args):
         return
+
+    def _cors(self):
+        origin = (self.headers.get("Origin") or "").rstrip("/")
+        allowed = os.environ.get("WIFI_SITE_ORIGIN", "https://wifi.msuman.in").rstrip("/")
+        if origin in (allowed, "http://127.0.0.1:8765", "http://localhost:8765"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def _send(self, code, content_type, body):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -824,6 +866,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._cors()
         self.end_headers()
         self.wfile.write(data)
 
@@ -843,6 +886,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return data if isinstance(data, dict) else None
 
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self._cors()
+        self.end_headers()
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
@@ -850,7 +901,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
         elif path == "/api/state":
-            self._send(200, "application/json; charset=utf-8", json.dumps(self.inbox.public_state()))
+            if self.public_mode == "live":
+                state = self.radar.snapshot()
+            else:
+                state = self.inbox.public_state()
+            self._send(200, "application/json; charset=utf-8", json.dumps(state))
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -911,6 +966,7 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
     radar = Radar(subnet, no_ports, online, interval)
     Handler.radar = radar
     Handler.inbox = Inbox()
+    Handler.public_mode = public_mode()
     threading.Thread(target=radar.loop, name="wifi-scan", daemon=True).start()
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
@@ -921,8 +977,11 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
     print("Isi computer pe: http://127.0.0.1:%s" % port, flush=True)
     if not lan.startswith("127."):
         print("Usi WiFi ke phone se: http://%s:%s" % (lan, port), flush=True)
-    print("Public page deploy wala LAN nahi dikhata. List tab aati hai jab WiFi wala computer --report bheje.", flush=True)
-    print("Is machine ka WiFi sirf circle pe teen click aur code ke baad. Ctrl+C se band.", flush=True)
+    if Handler.public_mode == "live":
+        print("Page isi computer ke WiFi ki list khud dikhata hai.", flush=True)
+    else:
+        print("Deploy host ki list public page pe nahi. Circle aur code ke baad milti hai.", flush=True)
+    print("Ctrl+C se band.", flush=True)
     if os.path.exists("/.dockerenv"):
         print("Docker ke andar. Devices tabhi dikhenge jab network host ho.", flush=True)
 

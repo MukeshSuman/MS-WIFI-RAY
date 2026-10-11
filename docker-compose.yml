@@ -15,6 +15,7 @@ services:
       WIFI_HOST: 0.0.0.0
       PORT: "8765"
       WIFI_INTERVAL: "20"
+      WIFI_PUBLIC: inbox
     volumes:
       - scanner-data:/data
 
