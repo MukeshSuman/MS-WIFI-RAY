@@ -71,6 +71,23 @@ PAGE = """<!DOCTYPE html>
     border: 1px solid #3d4d38; border-radius: 6px; padding: 4px 6px;
   }
   .empty { color: #9aa892; padding: 16px; }
+  .log h2 { margin: 0; padding: 12px 12px 0; font-size: 14px; color: #9aa892; }
+  .log .rows { padding: 8px 12px 12px; }
+  .log .rows div { padding: 6px 0; border-bottom: 1px solid #232a21; }
+  .log .when { color: #9aa892; margin-right: 10px; }
+  .log .connect { color: #5ddea0; font-weight: 700; margin-right: 10px; }
+  .log .disconnect { color: #ff8b8b; font-weight: 700; margin-right: 10px; }
+  button.mac {
+    background: none; border: 0; padding: 0; color: inherit;
+    font: inherit; cursor: pointer; text-decoration: underline;
+  }
+  #hist {
+    display: none; position: fixed; inset: 0; z-index: 40;
+    background: rgba(0, 0, 0, 0.55); padding: 64px 16px 16px;
+  }
+  #hist.show { display: block; }
+  #hist .rows { margin-top: 8px; max-height: 60vh; overflow: auto; }
+  #hist .rows div { padding: 6px 0; border-bottom: 1px solid #232a21; }
   button.dot {
     position: fixed; top: 12px; right: 12px; z-index: 20;
     width: 14px; height: 14px; padding: 0; border: 0; border-radius: 50%;
@@ -102,6 +119,9 @@ PAGE = """<!DOCTYPE html>
   .wifi span, .iface { color: #9aa892; font-size: 14px; }
   .iface { padding: 4px 0; }
   .on { color: #d6ff6a; }
+  #tabs { display: none; gap: 8px; padding: 14px 18px 0; }
+  #tabs.show { display: flex; }
+  button.tab.on { background: #31461c; border-color: #6d8f32; color: #d6ff6a; }
 </style>
 </head>
 <body>
@@ -124,6 +144,10 @@ PAGE = """<!DOCTYPE html>
   <h1 id="ssid">Connected devices</h1>
   <p class="sub" id="sub">Website pe is WiFi ki list yahan dikhegi.</p>
 </header>
+<div id="tabs">
+  <button type="button" id="tabWifi" class="tab on">WiFi</button>
+  <button type="button" id="tabInternal" class="tab">Internal</button>
+</div>
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
   <div id="status">Scan ho raha hai...</div>
@@ -139,6 +163,18 @@ PAGE = """<!DOCTYPE html>
   </table>
   <div class="empty" id="empty">Scan chal raha hai.</div>
 </div>
+<div class="panel log" id="logPanel">
+  <h2>Connect / Disconnect</h2>
+  <div class="rows" id="log"></div>
+</div>
+<div id="hist">
+  <div class="sheet wide">
+    <h2 id="histTitle">History</h2>
+    <p class="sub" id="histSub"></p>
+    <div class="rows" id="histRows"></div>
+    <div class="rowb"><button type="button" id="histClose">Band</button></div>
+  </div>
+</div>
 <script>
 const ssidEl = document.getElementById("ssid");
 const subEl = document.getElementById("sub");
@@ -149,6 +185,12 @@ let tableKey = "";
 let seenGen = -1;
 let stateFrom = "";
 let postedAt = 0;
+let view = "public";
+let unlockCode = "";
+let internalData = null;
+let publicData = null;
+let logKey = "";
+let historyEvents = [];
 
 function el(tag, text, cls) {
   const n = document.createElement(tag);
@@ -165,7 +207,15 @@ function render(devices) {
   emptyEl.style.display = devices.length ? "none" : "block";
   devices.forEach((d) => {
     const tr = el("tr", null, "c" + (d.color || 0));
-    ["ip", "mac", "vendor", "type", "hostname"].forEach((field) => tr.appendChild(el("td", d[field] || "")));
+    ["ip", "mac", "vendor", "type", "hostname"].forEach((field) => {
+      if (field === "mac" && d.mac && d.mac !== "?" && d.mac !== "-") {
+        const td = el("td");
+        td.appendChild(macButton(d.mac));
+        tr.appendChild(td);
+      } else {
+        tr.appendChild(el("td", d[field] || ""));
+      }
+    });
     tr.appendChild(el("td", (d.ports || []).join(",")));
     const nameTd = el("td");
     if (!d.mac || d.mac === "?" || d.mac === "-" || d.name === "Ye computer") {
@@ -189,14 +239,133 @@ function render(devices) {
 }
 
 async function saveName(mac, name) {
-  const url = stateFrom || "/api/name";
+  const url = view === "internal" ? "/api/name" : (stateFrom || "/api/name");
   await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mac: mac, name: name })
   });
   tableKey = "";
-  tick();
+  if (view === "internal") refreshInternal();
+  else tick();
+}
+
+function paintChrome(data, heading, sub, emptyWaiting) {
+  const devices = data.devices || [];
+  document.getElementById("count").textContent = String(devices.length);
+  document.getElementById("err").textContent = data.error || data.warning || "";
+  ssidEl.textContent = heading;
+  subEl.textContent = sub;
+  if (!devices.length) {
+    emptyEl.textContent = data.scanning ? "Scan chal raha hai." : emptyWaiting;
+  }
+  if (data.scanning) document.getElementById("status").textContent = "Scan ho raha hai...";
+  else if (!data.updated) document.getElementById("status").textContent = "Scan ka intezar";
+  else {
+    const ago = Math.max(0, Math.round(Date.now() / 1000 - data.updated));
+    document.getElementById("status").textContent = "Aakhri scan " + ago + "s pehle";
+  }
+  render(devices);
+  renderLog(data.events || []);
+}
+
+function macButton(mac) {
+  const btn = el("button", mac, "mac");
+  btn.type = "button";
+  btn.addEventListener("click", () => showHistory(mac));
+  return btn;
+}
+
+function clockText(at) {
+  if (!at) return "";
+  return new Date(at * 1000).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function logLine(ev, withMac) {
+  const row = el("div");
+  row.appendChild(el("span", clockText(ev.at), "when"));
+  const left = ev.action === "disconnect";
+  row.appendChild(el("span", left ? "Disconnect" : "Connect", left ? "disconnect" : "connect"));
+  const bits = [ev.name && ev.name !== "NEW" ? ev.name : "", ev.ip, ev.hostname];
+  if (withMac && ev.mac && ev.mac !== "?" && ev.mac !== "-") bits.push(ev.mac);
+  row.appendChild(document.createTextNode(bits.filter(Boolean).join("   ")));
+  return row;
+}
+
+function showHistory(mac) {
+  const want = String(mac || "").toUpperCase();
+  const rows = historyEvents.filter((ev) => String(ev.mac || "").toUpperCase() === want);
+  document.getElementById("histTitle").textContent = mac;
+  document.getElementById("histSub").textContent = rows.length ? (rows.length + " events") : "Is MAC ki history abhi nahi hai.";
+  const box = document.getElementById("histRows");
+  box.textContent = "";
+  rows.forEach((ev) => box.appendChild(logLine(ev, false)));
+  document.getElementById("hist").classList.add("show");
+}
+
+function renderLog(events) {
+  historyEvents = events || [];
+  const box = document.getElementById("log");
+  const key = JSON.stringify(historyEvents);
+  if (key === logKey) return;
+  logKey = key;
+  box.textContent = "";
+  if (!historyEvents.length) {
+    box.appendChild(el("div", "Abhi koi connect ya disconnect nahi hua."));
+    return;
+  }
+  historyEvents.forEach((ev) => {
+    const row = logLine(ev, false);
+    if (ev.mac && ev.mac !== "?" && ev.mac !== "-") {
+      row.appendChild(document.createTextNode("   "));
+      row.appendChild(macButton(ev.mac));
+    }
+    box.appendChild(row);
+  });
+}
+
+function paintPublic(data) {
+  const title = data.ssid || data.net || "WiFi";
+  document.getElementById("tabWifi").textContent = title;
+  const sub = title === "WiFi" ? "Website pe is WiFi ki list yahan dikhegi." : "Is WiFi ke connected devices.";
+  paintChrome(data, title, sub, "Is WiFi ki list abhi website pe nahi hai.");
+}
+
+function paintInternal() {
+  const data = internalData || {};
+  const devices = data.server_devices || [];
+  paintChrome({
+    devices: devices,
+    events: data.events || [],
+    scanning: !!data.scanning,
+    updated: data.updated,
+    error: "",
+    warning: ""
+  }, "Internal", data.ssid || "Deploy system ke connected devices.", "Is system ka scan abhi nahi aaya.");
+}
+
+function showView(next) {
+  view = next;
+  tableKey = "";
+  logKey = "";
+  document.getElementById("tabWifi").classList.toggle("on", view === "public");
+  document.getElementById("tabInternal").classList.toggle("on", view === "internal");
+  if (view === "internal") paintInternal();
+  else if (publicData) paintPublic(publicData);
+}
+
+async function refreshInternal() {
+  if (!unlockCode) return;
+  try {
+    const res = await fetch("/api/networks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: unlockCode })
+    });
+    if (!res.ok) return;
+    internalData = await res.json();
+    if (view === "internal") paintInternal();
+  } catch (e) {}
 }
 
 async function localState() {
@@ -256,36 +425,17 @@ async function tick() {
   } else {
     data = remote;
   }
-  const devices = data.devices || [];
-  document.getElementById("count").textContent = String(devices.length);
-  document.getElementById("err").textContent = data.error || data.warning || "";
-  const title = data.ssid || data.net || "";
-  if (title) {
-    ssidEl.textContent = title;
-    subEl.textContent = "Is WiFi ke connected devices.";
-  } else {
-    ssidEl.textContent = "Connected devices";
-    subEl.textContent = "Website pe is WiFi ki list yahan dikhegi.";
-  }
-  if (!data.connected) {
-    emptyEl.textContent = "Is WiFi ki list abhi website pe nahi hai.";
-  } else {
-    emptyEl.textContent = data.scanning ? "Scan chal raha hai." : "Koi device nahi mila.";
-  }
-  if (data.scanning) document.getElementById("status").textContent = "Scan ho raha hai...";
-  else if (!data.updated) document.getElementById("status").textContent = "Scan ka intezar";
-  else if (data.updated) {
-    const ago = Math.max(0, Math.round(Date.now() / 1000 - data.updated));
-    document.getElementById("status").textContent = "Aakhri scan " + ago + "s pehle";
-  }
+  publicData = data;
+  if (view === "public") paintPublic(data);
+  else document.getElementById("tabWifi").textContent = data.ssid || data.net || "WiFi";
   if (typeof data.generation === "number" && data.generation !== seenGen) {
-    if (seenGen !== -1 && data.connected) {
-      alertEl.textContent = "List update ho gayi. Devices: " + devices.length;
+    if (seenGen !== -1 && data.connected && view === "public") {
+      alertEl.textContent = "List update ho gayi. Devices: " + (data.devices || []).length;
       alertEl.classList.add("show");
     }
     seenGen = data.generation;
   }
-  render(devices);
+  if (unlockCode) refreshInternal();
 }
 
 const gate = document.getElementById("gate");
@@ -326,58 +476,14 @@ document.getElementById("dot").addEventListener("click", () => {
   }
 });
 document.getElementById("gateClose").addEventListener("click", closeGate);
+document.getElementById("histClose").addEventListener("click", () => document.getElementById("hist").classList.remove("show"));
+document.getElementById("hist").addEventListener("click", (event) => {
+  if (event.target.id === "hist") document.getElementById("hist").classList.remove("show");
+});
 gate.addEventListener("click", (event) => { if (event.target === gate) closeGate(); });
 
-function paintNetworks(data) {
-  gateList.textContent = "";
-  sheet().classList.add("wide");
-  document.getElementById("gateTitle").textContent = "Internal";
-  const own = data.server_devices || [];
-  gateList.appendChild(el("p", "Devices " + own.length + (data.ssid ? "   " + data.ssid : ""), "sub"));
-  const panel = el("div", null, "panel");
-  const table = document.createElement("table");
-  const head = document.createElement("thead");
-  const hr = document.createElement("tr");
-  ["IP", "MAC", "Vendor", "Type", "Hostname", "Ports", "Naam"].forEach((name) => hr.appendChild(el("th", name)));
-  head.appendChild(hr);
-  const body = document.createElement("tbody");
-  own.forEach((d) => {
-    const tr = el("tr", null, "c" + (d.color || 0));
-    ["ip", "mac", "vendor", "type", "hostname"].forEach((field) => tr.appendChild(el("td", d[field] || "")));
-    tr.appendChild(el("td", (d.ports || []).join(",")));
-    const nameTd = el("td");
-    if (!d.mac || d.mac === "?" || d.mac === "-" || d.name === "Ye computer") {
-      nameTd.appendChild(el("span", d.name || "", d.name === "NEW" ? "new" : ""));
-    } else {
-      const box = el("div", null, "namebox");
-      const input = document.createElement("input");
-      input.value = d.name === "NEW" ? "" : (d.name || "");
-      input.placeholder = d.name === "NEW" ? "NEW" : "naam";
-      input.setAttribute("aria-label", "Device ka naam");
-      const btn = el("button", "Save");
-      btn.type = "button";
-      btn.addEventListener("click", () => saveInternal(d.mac, input.value));
-      box.appendChild(input);
-      box.appendChild(btn);
-      nameTd.appendChild(box);
-    }
-    tr.appendChild(nameTd);
-    body.appendChild(tr);
-  });
-  table.appendChild(head);
-  table.appendChild(body);
-  panel.appendChild(table);
-  if (!own.length) panel.appendChild(el("div", "Is system ka scan abhi nahi aaya.", "empty"));
-  gateList.appendChild(panel);
-}
-
-async function saveInternal(mac, name) {
-  await fetch("/api/name", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mac: mac, name: name })
-  });
-}
+document.getElementById("tabWifi").addEventListener("click", () => showView("public"));
+document.getElementById("tabInternal").addEventListener("click", () => showView("internal"));
 
 gateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -396,8 +502,11 @@ gateForm.addEventListener("submit", async (event) => {
       return;
     }
     gateMsg.textContent = "";
-    gateForm.hidden = true;
-    paintNetworks(data);
+    unlockCode = gateCode.value;
+    internalData = data;
+    document.getElementById("tabs").classList.add("show");
+    closeGate();
+    showView("internal");
   } catch (e) {
     gateMsg.textContent = "Server se connection nahi";
   } finally {
@@ -694,16 +803,143 @@ def host_networks():
     }
 
 
+def device_key(row):
+    mac = str(row.get("mac") or "").upper().strip()
+    if mac and mac not in ("?", "-", "00:00:00:00:00:00") and ":" in mac:
+        return "m:" + mac
+    ip = str(row.get("ip") or "").strip()
+    return ("i:" + ip) if ip else ""
+
+
+def device_brief(row):
+    return {
+        "ip": str(row.get("ip") or "")[:45],
+        "mac": str(row.get("mac") or "")[:20],
+        "name": str(row.get("name") or "")[:40],
+        "hostname": str(row.get("hostname") or "")[:60],
+    }
+
+
+HISTORY_MAX = 2000
+
+
+class Presence:
+    """Pehli scan baseline hai. Uske baad join aur leave agle probe par. History file mein rehti hai."""
+
+    def __init__(self, path=None):
+        self.path = path
+        self.known = {}
+        self.misses = {}
+        self.ready = False
+        self.events = []
+        if path:
+            self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        events = data.get("events")
+        present = data.get("present")
+        if isinstance(events, list):
+            self.events = [row for row in events if isinstance(row, dict)][:HISTORY_MAX]
+        if isinstance(present, dict) and present:
+            self.known = present
+            self.ready = True
+
+    def _save(self):
+        if not self.path:
+            return
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump({"events": self.events[:HISTORY_MAX], "present": self.known}, handle)
+            os.replace(tmp, self.path)
+        except OSError:
+            return
+
+    def reset(self):
+        self.known = {}
+        self.misses = {}
+        self.ready = False
+
+    def seed(self, devices, events=None):
+        self.known = {}
+        self.misses = {}
+        for row in devices or []:
+            if not isinstance(row, dict):
+                continue
+            key = device_key(row)
+            if key:
+                self.known[key] = device_brief(row)
+        if isinstance(events, list):
+            self.events = [row for row in events if isinstance(row, dict)][:HISTORY_MAX]
+        self.ready = True
+
+    def update(self, devices):
+        current = {}
+        for row in devices or []:
+            if not isinstance(row, dict):
+                continue
+            key = device_key(row)
+            if key:
+                current[key] = device_brief(row)
+        fresh = []
+        now = time.time()
+        if not self.ready:
+            self.known = current
+            self.misses = {}
+            self.ready = True
+            self._save()
+            return fresh
+        for key, row in current.items():
+            self.misses.pop(key, None)
+            if key not in self.known:
+                fresh.append(self._event("connect", row, now))
+            self.known[key] = row
+        for key in list(self.known):
+            if key in current:
+                continue
+            self.misses[key] = self.misses.get(key, 0) + 1
+            if self.misses[key] >= 1:
+                fresh.append(self._event("disconnect", self.known.pop(key), now))
+                self.misses.pop(key, None)
+        if fresh:
+            self.events = (fresh + self.events)[:HISTORY_MAX]
+        self._save()
+        return fresh
+
+    def _event(self, action, row, now):
+        item = dict(row)
+        item["action"] = action
+        item["at"] = now
+        label = item.get("name") if item.get("name") not in ("", "NEW") else ""
+        print("%-12s %-16s %s" % (action.upper(), item.get("ip") or "-", label or item.get("mac") or ""), flush=True)
+        return item
+
+
+def events_path():
+    return os.path.join(wifi_scanner.DATA_DIR, "events.json")
+
+
 class Radar:
     def __init__(self, subnet, no_ports, online, interval):
         self.subnet = subnet
         self.no_ports = no_ports
         self.online = online
         self.interval = max(10, int(interval))
+        self.fast_pause = 1
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.generation = 0
         self.last_key = None
+        self.presence = Presence(events_path())
+        self.quiet = {}
+        self.gone = {}
         self.state = {
             "scanning": False,
             "connected": False,
@@ -716,6 +952,7 @@ class Radar:
             "warning": "",
             "generation": 0,
             "devices": [],
+            "events": list(self.presence.events),
         }
 
     def snapshot(self):
@@ -751,6 +988,7 @@ class Radar:
             key = (ssid, my_ip.rsplit(".", 1)[0])
             if self.last_key is not None and key != self.last_key:
                 self.generation += 1
+                self.presence.reset()
                 with self.lock:
                     self.state["devices"] = []
                     self.state["ssid"] = ssid
@@ -758,46 +996,127 @@ class Radar:
                     self.state["scanning"] = True
                 print("WIFI CHANGE  %s" % (ssid or my_ip), flush=True)
             self.last_key = key
-            with self.lock:
-                self.state["scanning"] = True
-                self.state["connected"] = True
-                self.state["ssid"] = ssid
-                self.state["error"] = ""
+            net = ipaddress.ip_network(self.subnet or ("%s/24" % my_ip), strict=False)
+            due = time.time() - getattr(self, "last_full", 0) >= self.interval
             try:
-                result = wifi_scanner.scan_once(self.subnet, self.no_ports, self.online)
+                if due:
+                    with self.lock:
+                        self.state["scanning"] = True
+                        self.state["connected"] = True
+                        self.state["ssid"] = ssid
+                        self.state["error"] = ""
+                    result = wifi_scanner.scan_once(
+                        self.subnet, self.no_ports, self.online,
+                        previous=self.state.get("devices") or [],
+                        holdout=list(self.gone),
+                    )
+                    devices = []
+                    for i, row in enumerate(self._keep(result["rows"])):
+                        item = dict(row)
+                        item.pop("confirmed", None)
+                        item["color"] = i % 7
+                        devices.append(item)
+                    self.last_full = time.time()
+                    fresh = self._apply(devices, ssid, result["my_ip"], result["net"], result.get("scanner_mac") or "", result["elapsed"])
+                    print("WiFi: %-20s %s  scanner %s  %s devices" % (
+                        ssid or "-", result["net"], result.get("scanner_mac") or "?", len(devices)), flush=True)
+                    if devices:
+                        threading.Thread(
+                            target=publish_live, args=(result, ssid), name="wifi-report", daemon=True
+                        ).start()
+                else:
+                    probed = wifi_scanner.probe_present(
+                        net, my_ip, self.state.get("devices") or [], holdout=list(self.gone)
+                    )
+                    devices = self._rows_from_probe(self._keep(probed), my_ip)
+                    fresh = self._apply(devices, ssid, my_ip, str(net), wifi_scanner.scanner_mac(), 0)
+                    if fresh:
+                        threading.Thread(
+                            target=publish_live,
+                            args=({"rows": devices, "my_ip": my_ip, "net": str(net), "scanner_mac": wifi_scanner.scanner_mac()}, ssid),
+                            name="wifi-report",
+                            daemon=True,
+                        ).start()
             except Exception as exc:
                 with self.lock:
                     self.state["scanning"] = False
                     self.state["error"] = str(exc)
-            else:
-                devices = []
-                for i, row in enumerate(result["rows"]):
-                    item = dict(row)
-                    item["color"] = i % 7
-                    devices.append(item)
-                with self.lock:
-                    self.state.update({
-                        "scanning": False,
-                        "connected": True,
-                        "ssid": ssid,
-                        "scanner_mac": result.get("scanner_mac") or "",
-                        "my_ip": result["my_ip"],
-                        "net": result["net"],
-                        "updated": time.time(),
-                        "elapsed": result["elapsed"],
-                        "error": "",
-                        "warning": "",
-                        "generation": self.generation,
-                        "devices": devices,
-                    })
-                print("WiFi: %-20s %s  scanner %s  %s devices" % (
-                    ssid or "-", result["net"], result.get("scanner_mac") or "?", len(devices)), flush=True)
-                if devices:
-                    threading.Thread(
-                        target=publish_live, args=(result, ssid), name="wifi-report", daemon=True
-                    ).start()
-            self.wake.wait(self.interval)
+            self.wake.wait(self.fast_pause)
             self.wake.clear()
+
+    def _keep(self, devices):
+        """Ping ya port na bole to purani ARP ko 3 probe tak saho, phir Disconnect."""
+        now = time.time()
+        self.gone = {ip: at for ip, at in self.gone.items() if now - at < 600}
+        shown = []
+        seen = set()
+        for row in devices or []:
+            ip = row.get("ip") or ""
+            seen.add(ip)
+            sure = row.get("confirmed", True) and ip not in self.gone
+            if row.get("confirmed", True) and ip in self.gone:
+                self.gone.pop(ip, None)
+                sure = True
+            if sure:
+                self.quiet.pop(ip, None)
+                shown.append(row)
+            else:
+                misses = self.quiet.get(ip, 0) + 1
+                self.quiet[ip] = misses
+                if misses < 3:
+                    shown.append(row)
+                else:
+                    self.gone[ip] = now
+        for ip in list(self.quiet):
+            if ip not in seen:
+                self.quiet.pop(ip, None)
+        return shown
+
+    def _rows_from_probe(self, probed, my_ip):
+        by_mac = {}
+        by_ip = {}
+        for device in self.state.get("devices") or []:
+            mac = device.get("mac") or ""
+            if mac and mac not in ("?", "-"):
+                by_mac[mac] = device
+            if device.get("ip"):
+                by_ip[device["ip"]] = device
+        rows = []
+        for i, raw in enumerate(probed):
+            prev = by_mac.get(raw.get("mac") or "") or by_ip.get(raw.get("ip") or "") or {}
+            mac = raw.get("mac") or prev.get("mac") or "?"
+            ip = raw.get("ip") or prev.get("ip") or ""
+            rows.append({
+                "ip": ip,
+                "mac": mac,
+                "vendor": prev.get("vendor") or "",
+                "type": prev.get("type") or "",
+                "hostname": prev.get("hostname") or "",
+                "ports": prev.get("ports") or [],
+                "name": prev.get("name") or ("Ye computer" if ip == my_ip else "NEW"),
+                "color": i % 7,
+            })
+        return rows
+
+    def _apply(self, devices, ssid, my_ip, net, scanner, elapsed):
+        fresh = self.presence.update(devices)
+        with self.lock:
+            self.state.update({
+                "scanning": False,
+                "connected": True,
+                "ssid": ssid,
+                "scanner_mac": scanner,
+                "my_ip": my_ip,
+                "net": net,
+                "updated": time.time(),
+                "elapsed": elapsed,
+                "error": "",
+                "warning": "",
+                "generation": self.generation,
+                "devices": devices,
+                "events": list(self.presence.events),
+            })
+        return fresh
 
     def set_name(self, mac, name):
         mac = wifi_scanner.norm_mac(mac)
@@ -853,6 +1172,7 @@ class Inbox:
         self.lock = threading.Lock()
         self.latest = None
         self.seq = 0
+        self.presence = Presence()
         self._load()
 
     def _load(self):
@@ -867,6 +1187,7 @@ class Inbox:
                 self.seq = int(data.get("id") or 0)
             except (TypeError, ValueError):
                 self.seq = 0
+            self.presence.seed(data.get("devices") or [], data.get("events") or [])
 
     def _save(self, report):
         path = inbox_path()
@@ -880,6 +1201,8 @@ class Inbox:
 
     def add(self, report):
         with self.lock:
+            self.presence.update(report.get("devices") or [])
+            report["events"] = list(self.presence.events)
             self.seq += 1
             report["id"] = self.seq
             report["at"] = time.time()
@@ -900,6 +1223,7 @@ class Inbox:
                 "error": "",
                 "warning": "",
                 "ssid": "",
+                "events": [],
             }
         devices = []
         for i, row in enumerate(item.get("devices") or []):
@@ -916,6 +1240,7 @@ class Inbox:
             "warning": "",
             "ssid": item.get("ssid") or "",
             "net": item.get("net") or "",
+            "events": item.get("events") or [],
         }
 
 
@@ -1060,7 +1385,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(401, "application/json; charset=utf-8", b'{"ok":false}')
                 return
             payload = host_networks()
-            payload["server_devices"] = self.radar.snapshot().get("devices") or []
+            snap = self.radar.snapshot()
+            payload["server_devices"] = snap.get("devices") or []
+            payload["scanning"] = bool(snap.get("scanning"))
+            payload["updated"] = snap.get("updated")
+            payload["events"] = snap.get("events") or []
             self._send(200, "application/json; charset=utf-8", json.dumps(payload))
             return
         if path != "/api/name":

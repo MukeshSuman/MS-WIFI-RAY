@@ -389,6 +389,179 @@ def ping(ip):
         return False
 
 
+def ping_quick(ip):
+    """Presence ke liye chhota wait. Device judne/hatne ka intezaar lamba na ho."""
+    if SYSTEM == "Windows":
+        cmd = ["ping", "-n", "1", "-w", "400", ip]
+    elif SYSTEM == "Darwin":
+        cmd = ["ping", "-c", "1", "-W", "400", ip]
+    else:
+        cmd = ["ping", "-c", "1", "-W", "1", ip]
+    try:
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=1.2).returncode == 0
+    except Exception:
+        return False
+
+
+def forget_arp(ip):
+    """Purani ARP entry hatao, taaki hat chuka device turant gayab dikhe."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return
+    if not isinstance(addr, ipaddress.IPv4Address):
+        return
+    cmd = ["arp", "-d", ip] if SYSTEM == "Darwin" else ["ip", "neigh", "del", ip]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+    except Exception:
+        return
+
+
+def neighbor_token(ip):
+    """Mac par ARP expire seconds, Linux par neigh state. Purani entry yahin se pakdi jati hai."""
+    if SYSTEM == "Darwin":
+        try:
+            out = subprocess.run(["route", "-n", "get", ip], capture_output=True, text=True, timeout=2).stdout
+        except Exception:
+            return None
+        lines = out.splitlines()
+        for i, line in enumerate(lines):
+            if "expire" in line.lower() and i + 1 < len(lines):
+                nums = lines[i + 1].split()
+                if nums:
+                    try:
+                        return int(nums[-1])
+                    except ValueError:
+                        return None
+        return None
+    try:
+        out = subprocess.run(["ip", "neigh", "show", ip], capture_output=True, text=True, timeout=2).stdout
+    except Exception:
+        return None
+    parts = out.split()
+    for state in ("REACHABLE", "DELAY", "PROBE", "STALE", "FAILED", "INCOMPLETE", "PERMANENT"):
+        if state in parts:
+            return state
+    return None
+
+
+def neighbor_fresh(before, after):
+    """Ping ke baad entry nayi bani ho to device abhi bhi hai."""
+    if isinstance(before, int) and isinstance(after, int):
+        return after >= before
+    if isinstance(after, str):
+        return after in ("REACHABLE", "DELAY", "PROBE", "PERMANENT")
+    return False
+
+
+def host_responded(ip, ports):
+    """Ping band ho to bhi RST ya khula port batata hai ki device network par hai."""
+    import errno
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.35)
+    try:
+        sock.connect((ip, 9))
+        sock.send(b"x")
+        try:
+            sock.recv(1)
+        except ConnectionRefusedError:
+            return True
+        except OSError as exc:
+            if exc.errno == errno.ECONNREFUSED:
+                return True
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    nums = []
+    for name in ports or []:
+        if str(name).isdigit():
+            nums.append(int(name))
+        else:
+            for num, label in PORTS.items():
+                if label == name:
+                    nums.append(num)
+    if not nums:
+        nums = [62078]
+    for port in nums[:3]:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.3)
+                code = probe.connect_ex((ip, port))
+            if code == 0 or code in (errno.ECONNREFUSED, 61, 111):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def confirm_ips(net, my_ip, previous, alive, arp, before, holdout=()):
+    """Purani ARP akeli device ko zinda nahi rakhti. Ping, port, ya nayi ARP chahiye."""
+    prev = {}
+    for row in previous or []:
+        ip = str(row.get("ip") or "")
+        if ip:
+            prev[ip] = row
+    before = before or {}
+    need = [ip for ip in prev if ip not in alive and ip != my_ip]
+    answered = set()
+    if need:
+        def check(ip):
+            return ip, host_responded(ip, (prev.get(ip) or {}).get("ports") or [])
+        with ThreadPoolExecutor(max_workers=40) as ex:
+            for ip, ok in ex.map(check, need):
+                if ok:
+                    answered.add(ip)
+    after = {ip: neighbor_token(ip) for ip in set(prev) | set(holdout or ())}
+    confirmed = set(alive) | answered
+    held = set(holdout or ())
+    for ip in arp:
+        fresh = neighbor_fresh(before.get(ip), after.get(ip))
+        if ip in held and ip not in alive and ip not in answered and not fresh:
+            continue
+        if ip not in prev or fresh:
+            confirmed.add(ip)
+    try:
+        if my_ip and ipaddress.ip_address(my_ip) in net:
+            confirmed.add(my_ip)
+    except ValueError:
+        pass
+    return confirmed
+
+
+def probe_present(net, my_ip, previous=(), holdout=()):
+    """Poora /24, bina port scan. Hat chuka device purani ARP par nahi tikta."""
+    before = {}
+    for row in previous or []:
+        ip = str(row.get("ip") or "")
+        if ip:
+            before[ip] = neighbor_token(ip)
+    for ip in before:
+        forget_arp(ip)
+    hosts = [str(h) for h in net.hosts()]
+    with ThreadPoolExecutor(max_workers=80) as ex:
+        alive = {ip for ip, ok in zip(hosts, ex.map(ping_quick, hosts)) if ok}
+    arp = read_arp(net)
+    confirmed = confirm_ips(net, my_ip, previous, alive, arp, before, holdout)
+    ips = set(arp) | alive | confirmed
+    try:
+        if my_ip and ipaddress.ip_address(my_ip) in net:
+            ips.add(my_ip)
+    except ValueError:
+        pass
+    own = scanner_mac()
+    rows = []
+    for ip in sorted(ips, key=ipaddress.ip_address):
+        rows.append({
+            "ip": ip,
+            "mac": arp.get(ip) or (own if ip == my_ip else "?"),
+            "confirmed": ip in confirmed,
+        })
+    return rows
+
+
 def read_arp(net):
     """OS ki ARP table padho: IP -> MAC (ping ke baad isme sab aa jate hain)."""
     cmds = [["ip", "neigh"], ["arp", "-a"]] if SYSTEM == "Linux" else [["arp", "-a"]]
@@ -479,7 +652,7 @@ def guess_type(vendor, ports, mac):
     return ""
 
 
-def scan_once(subnet=None, no_ports=False, online=False, announce=False):
+def scan_once(subnet=None, no_ports=False, online=False, announce=False, previous=None, holdout=()):
     """Ek baar scan. Rows wahi shape mein jo CLI table dikhata hai."""
     known = load_store("known_devices")
     my_ip = lan_ip()
@@ -490,11 +663,17 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False):
     hosts = [str(h) for h in net.hosts()]
     if announce:
         print(f"Mera IP: {my_ip}   Scanner MAC: {scanner_mac() or '?'}   Scanning {net} ({len(hosts)} addresses)...")
+    before = {}
+    for row in previous or []:
+        ip = str(row.get("ip") or "")
+        if ip:
+            before[ip] = neighbor_token(ip)
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=100) as ex:
         alive = {ip for ip, ok in zip(hosts, ex.map(ping, hosts)) if ok}
 
     arp = read_arp(net)
+    confirmed = confirm_ips(net, my_ip, previous, alive, arp, before, holdout) if previous else None
     ips = set(arp) | alive
     if ipaddress.ip_address(my_ip) in net:
         ips.add(my_ip)
@@ -520,7 +699,8 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False):
             name = "NEW"
             new_count += 1
         rows.append({"ip": ip, "mac": mac, "vendor": vendor, "type": guess_type(vendor, ports, mac),
-                     "hostname": host, "ports": ports, "name": name})
+                     "hostname": host, "ports": ports, "name": name,
+                     "confirmed": True if confirmed is None else ip in confirmed})
     if online:
         save_store("vendor_cache", cache)
     save_store("devices", rows)
