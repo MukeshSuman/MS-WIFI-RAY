@@ -1,0 +1,10 @@
+# Scan results and local names: IP, MAC, device names
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Docker data volume and macOS junk
+data/
+.DS_Store

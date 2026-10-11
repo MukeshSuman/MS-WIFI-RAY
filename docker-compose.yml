@@ -1,0 +1,22 @@
+# WiFi devices tabhi dikhte hain jab container host ka network share kare.
+# Ye Linux pe kaam karta hai. Mac ka Docker WiFi ki ARP table nahi dekhta.
+services:
+  wifi-scanner:
+    build: .
+    image: wifi-scanner:local
+    container_name: wifi-scanner
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    cap_add:
+      - NET_RAW
+    environment:
+      WIFI_DATA_DIR: /data
+      WIFI_HOST: 0.0.0.0
+      PORT: "8765"
+      WIFI_INTERVAL: "20"
+    volumes:
+      - scanner-data:/data
+
+volumes:
+  scanner-data:
