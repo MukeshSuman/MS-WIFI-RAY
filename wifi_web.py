@@ -116,11 +116,8 @@ PAGE = """<!DOCTYPE html>
   </div>
 </div>
 <header>
-  <h1>Connected devices</h1>
-  <p class="sub">Is network ke connected devices.</p>
-  <div class="actions">
-    <button id="scan" class="primary" type="button">Scan abhi</button>
-  </div>
+  <h1 id="ssid">Connected devices</h1>
+  <p class="sub" id="sub">Jis WiFi se connected ho, us computer pe scanner chalao. Ye page usi ki list dikhata hai.</p>
 </header>
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
@@ -138,6 +135,8 @@ PAGE = """<!DOCTYPE html>
   <div class="empty" id="empty">Scan chal raha hai.</div>
 </div>
 <script>
+const ssidEl = document.getElementById("ssid");
+const subEl = document.getElementById("sub");
 const rowsEl = document.getElementById("rows");
 const emptyEl = document.getElementById("empty");
 const alertEl = document.getElementById("alert");
@@ -203,8 +202,15 @@ async function tick() {
   const devices = data.devices || [];
   document.getElementById("count").textContent = String(devices.length);
   document.getElementById("err").textContent = data.error || data.warning || "";
+  if (data.ssid) {
+    ssidEl.textContent = data.ssid;
+    subEl.textContent = "Is WiFi ke connected devices. Deploy wale system ki list yahan nahi hai.";
+  } else {
+    ssidEl.textContent = "Connected devices";
+    subEl.textContent = "Jis WiFi se connected ho, us computer pe scanner chalao. Ye page usi ki list dikhata hai.";
+  }
   if (!data.connected) {
-    emptyEl.textContent = "Abhi scan available nahi.";
+    emptyEl.textContent = "Is WiFi ka scan abhi nahi aaya.";
   } else {
     emptyEl.textContent = data.scanning ? "Scan chal raha hai." : "Koi device nahi mila.";
   }
@@ -222,8 +228,6 @@ async function tick() {
   }
   render(devices);
 }
-
-document.getElementById("scan").addEventListener("click", () => fetch("/api/scan", { method: "POST" }));
 
 const gate = document.getElementById("gate");
 const gateForm = document.getElementById("gateForm");
@@ -283,6 +287,13 @@ function paintNetworks(data) {
   (data.interfaces || []).forEach((item) => {
     gateList.appendChild(el("div", [item.name, item.ip, item.mac].filter(Boolean).join("   "), "iface"));
   });
+  const own = data.server_devices || [];
+  if (own.length) {
+    gateList.appendChild(el("h2", "Deploy system ke devices"));
+    own.forEach((item) => {
+      gateList.appendChild(el("div", [item.ip, item.mac, item.hostname || item.name || ""].filter(Boolean).join("   "), "iface"));
+    });
+  }
 }
 
 gateForm.addEventListener("submit", async (event) => {
@@ -720,8 +731,89 @@ class Radar:
         return mac, name
 
 
+class Inbox:
+    """Public page sirf un scans ko dikhata hai jo kisi aur computer ne bheje."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.latest = None
+        self.seq = 0
+
+    def add(self, report):
+        with self.lock:
+            self.seq += 1
+            report["id"] = self.seq
+            report["at"] = time.time()
+            self.latest = report
+            return self.seq
+
+    def public_state(self):
+        with self.lock:
+            item = dict(self.latest) if self.latest else None
+        if not item:
+            return {
+                "connected": False,
+                "scanning": False,
+                "devices": [],
+                "updated": None,
+                "generation": 0,
+                "error": "",
+                "warning": "",
+                "ssid": "",
+            }
+        devices = []
+        for i, row in enumerate(item.get("devices") or []):
+            shown = dict(row)
+            shown["color"] = i % 7
+            devices.append(shown)
+        return {
+            "connected": True,
+            "scanning": False,
+            "devices": devices,
+            "updated": item.get("at"),
+            "generation": item.get("id") or 0,
+            "error": "",
+            "warning": "",
+            "ssid": item.get("ssid") or "",
+        }
+
+
+def clean_report(data):
+    mac = wifi_scanner.norm_mac(str(data.get("scanner_mac") or ""))
+    if not MAC_OK.fullmatch(mac):
+        raise ValueError("Scanner MAC galat hai")
+    raw_rows = data.get("devices")
+    if not isinstance(raw_rows, list):
+        raise ValueError("Devices list honi chahiye")
+    devices = []
+    for row in raw_rows[:400]:
+        if not isinstance(row, dict):
+            continue
+        ip = " ".join(str(row.get("ip") or "").split())[:45]
+        if not ip:
+            continue
+        ports = row.get("ports") if isinstance(row.get("ports"), list) else []
+        devices.append({
+            "ip": ip,
+            "mac": " ".join(str(row.get("mac") or "").split())[:20],
+            "vendor": " ".join(str(row.get("vendor") or "").split())[:60],
+            "type": " ".join(str(row.get("type") or "").split())[:40],
+            "hostname": " ".join(str(row.get("hostname") or "").split())[:60],
+            "ports": [" ".join(str(p).split())[:20] for p in ports[:12]],
+            "name": " ".join(str(row.get("name") or "").split())[:40],
+        })
+    return {
+        "scanner_mac": mac,
+        "ssid": " ".join(str(data.get("ssid") or "").split())[:40],
+        "my_ip": " ".join(str(data.get("my_ip") or "").split())[:45],
+        "net": " ".join(str(data.get("net") or "").split())[:32],
+        "devices": devices,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     radar = None
+    inbox = None
 
     def log_message(self, fmt, *args):
         return
@@ -735,12 +827,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _json_body(self):
+    def _json_body(self, limit=4096):
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
             n = 0
-        if n < 0 or n > 4096:
+        if n < 0 or n > limit:
+            if 0 < n <= 2000000:
+                self.rfile.read(n)
             return None
         raw = self.rfile.read(n) if n else b"{}"
         try:
@@ -756,10 +850,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
         elif path == "/api/state":
-            snap = self.radar.snapshot()
-            for key in ("ssid", "my_ip", "net"):
-                snap.pop(key, None)
-            self._send(200, "application/json; charset=utf-8", json.dumps(snap))
+            self._send(200, "application/json; charset=utf-8", json.dumps(self.inbox.public_state()))
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -768,7 +859,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        data = self._json_body() or {}
+        data = self._json_body(500000 if path == "/api/ingest" else 4096) or {}
+        if path == "/api/ingest":
+            expected = os.environ.get("WIFI_INGEST_TOKEN") or UNLOCK_CODE
+            got = str(data.get("token") or "").strip().encode("utf-8")
+            import hmac
+            if not hmac.compare_digest(got, expected.encode("utf-8")):
+                self._send(401, "application/json; charset=utf-8", b'{"ok":false}')
+                return
+            try:
+                report = clean_report(data)
+            except ValueError as exc:
+                self._send(400, "application/json; charset=utf-8", json.dumps({"ok": False, "error": str(exc)}))
+                return
+            self.inbox.add(report)
+            print("REPORT  %-18s %-20s %s devices" % (
+                report["scanner_mac"], report["ssid"] or "-", len(report["devices"])), flush=True)
+            self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
+            return
         if path == "/api/scan":
             self.radar.kick()
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
@@ -777,7 +885,9 @@ class Handler(BaseHTTPRequestHandler):
             if not code_ok(data.get("code")):
                 self._send(401, "application/json; charset=utf-8", b'{"ok":false}')
                 return
-            self._send(200, "application/json; charset=utf-8", json.dumps(host_networks()))
+            payload = host_networks()
+            payload["server_devices"] = self.radar.snapshot().get("devices") or []
+            self._send(200, "application/json; charset=utf-8", json.dumps(payload))
             return
         if path != "/api/name":
             self.send_error(404)
@@ -800,6 +910,7 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
     host = (host or "0.0.0.0").strip()
     radar = Radar(subnet, no_ports, online, interval)
     Handler.radar = radar
+    Handler.inbox = Inbox()
     threading.Thread(target=radar.loop, name="wifi-scan", daemon=True).start()
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
@@ -810,7 +921,8 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
     print("Isi computer pe: http://127.0.0.1:%s" % port, flush=True)
     if not lan.startswith("127."):
         print("Usi WiFi ke phone se: http://%s:%s" % (lan, port), flush=True)
-    print("Jis WiFi se ye computer juda hai, uske saare devices page pe aayenge. Ctrl+C se band.", flush=True)
+    print("Public page deploy wala LAN nahi dikhata. List tab aati hai jab WiFi wala computer --report bheje.", flush=True)
+    print("Is machine ka WiFi sirf circle pe teen click aur code ke baad. Ctrl+C se band.", flush=True)
     if os.path.exists("/.dockerenv"):
         print("Docker ke andar. Devices tabhi dikhenge jab network host ho.", flush=True)
 

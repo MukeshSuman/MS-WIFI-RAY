@@ -533,6 +533,29 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False):
     }
 
 
+def report_scan(url, result, token):
+    """Is computer ka scan deployed website ko bhejo. Server apna LAN nahi bhejta."""
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("Report URL http ya https hona chahiye")
+    if not url.rstrip("/").endswith("/api/ingest"):
+        url = url.rstrip("/") + "/api/ingest"
+    payload = {
+        "token": token,
+        "scanner_mac": result.get("scanner_mac") or scanner_mac(),
+        "ssid": wifi_ssid(),
+        "my_ip": result.get("my_ip") or "",
+        "net": result.get("net") or "",
+        "devices": result.get("rows") or [],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as response:
+        if response.status >= 300:
+            raise ValueError("site ne %s diya" % response.status)
+    print(f"Report gaya: {payload['ssid'] or payload['net']} -> {url}")
+
+
 def print_table(rows):
     cols = ["IP", "MAC", "Vendor", "Type", "Hostname", "Ports", "Naam"]
     data = [[r["ip"], r["mac"], r["vendor"], r["type"], r["hostname"],
@@ -555,7 +578,11 @@ def main():
     ap.add_argument("--online", action="store_true", help="unknown vendor internet se dhundho")
     ap.add_argument("--json", metavar="FILE", help="result JSON file me save karo")
     ap.add_argument("--name", nargs=2, metavar=("MAC", "NAAM"), help="device ko naam do")
-    ap.add_argument("--web", action="store_true", help="website: abhi jis WiFi se jude ho, uske saare devices")
+    ap.add_argument("--report", default=os.environ.get("WIFI_REPORT_URL", ""),
+                    help="deployed site, jaise https://wifi.msuman.in")
+    ap.add_argument("--token", default=os.environ.get("WIFI_INGEST_TOKEN", "9199"),
+                    help="report token")
+    ap.add_argument("--web", action="store_true", help="website: reports dikhata hai, khud ka LAN nahi")
     ap.add_argument("--host", default="0.0.0.0", help="web bind (default 0.0.0.0, usi WiFi ke devices khol sakein)")
     ap.add_argument("--port", type=int, default=8765, help="web port (default 8765)")
     ap.add_argument("--interval", type=int, default=20, help="web rescan seconds (default 20)")
@@ -587,6 +614,11 @@ def main():
     print('Naam dene ke liye: python wifi_scanner.py --name AA:BB:CC:DD:EE:FF "Bedroom ESP32"')
 
     print(f"Save: {scanner_folder()}")
+    if a.report:
+        try:
+            report_scan(a.report, result, a.token)
+        except Exception as exc:
+            print(f"Report nahi gaya: {exc}")
     if a.json:
         dest = a.json if os.path.isabs(a.json) else os.path.join(scanner_folder(), os.path.basename(a.json))
         save_json(dest, {"scanner_mac": result["scanner_mac"], "devices": result["rows"]})
