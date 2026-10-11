@@ -535,7 +535,7 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False):
     }
 
 
-def report_scan(url, result, token):
+def report_scan(url, result, token, ssid=None):
     """Is computer ka scan deployed website ko bhejo. Server apna LAN nahi bhejta."""
     url = (url or "").strip()
     if not url.startswith(("http://", "https://")):
@@ -545,7 +545,7 @@ def report_scan(url, result, token):
     payload = {
         "token": token,
         "scanner_mac": result.get("scanner_mac") or scanner_mac(),
-        "ssid": wifi_ssid(),
+        "ssid": wifi_ssid() if ssid is None else ssid,
         "my_ip": result.get("my_ip") or "",
         "net": result.get("net") or "",
         "devices": result.get("rows") or [],

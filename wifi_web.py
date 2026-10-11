@@ -117,7 +117,7 @@ PAGE = """<!DOCTYPE html>
 </div>
 <header>
   <h1 id="ssid">Connected devices</h1>
-  <p class="sub" id="sub">Ye page isi computer ke WiFi ki list khud dikhata hai.</p>
+  <p class="sub" id="sub">Website pe is WiFi ki list yahan dikhegi.</p>
 </header>
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
@@ -143,6 +143,7 @@ const alertEl = document.getElementById("alert");
 let tableKey = "";
 let seenGen = -1;
 let stateFrom = "";
+let postedAt = 0;
 
 function el(tag, text, cls) {
   const n = document.createElement(tag);
@@ -209,29 +210,60 @@ async function localState() {
   return null;
 }
 
+async function publish(data) {
+  if (!data || !data.scanner_mac || !(data.devices || []).length) return;
+  if (data.updated && data.updated === postedAt) return;
+  postedAt = data.updated || 0;
+  try {
+    const res = await fetch("/api/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: "9199",
+        scanner_mac: data.scanner_mac,
+        ssid: data.ssid || data.net || "",
+        my_ip: data.my_ip || "",
+        net: data.net || "",
+        devices: data.devices
+      })
+    });
+    if (!res.ok) postedAt = 0;
+  } catch (e) {
+    postedAt = 0;
+  }
+}
+
 async function tick() {
   let data;
   stateFrom = "";
+  let remote = null;
   try {
-    data = await localState();
-    if (data) stateFrom = "http://127.0.0.1:8765/api/name";
-    else data = await (await fetch("/api/state")).json();
+    remote = await (await fetch("/api/state")).json();
   } catch (e) {
     document.getElementById("status").textContent = "Server se connection nahi";
     return;
   }
+  const local = await localState();
+  if (local && (local.devices || []).length) {
+    data = local;
+    stateFrom = "http://127.0.0.1:8765/api/name";
+    publish(local);
+  } else {
+    data = remote;
+  }
   const devices = data.devices || [];
   document.getElementById("count").textContent = String(devices.length);
   document.getElementById("err").textContent = data.error || data.warning || "";
-  if (data.ssid) {
-    ssidEl.textContent = data.ssid;
+  const title = data.ssid || data.net || "";
+  if (title) {
+    ssidEl.textContent = title;
     subEl.textContent = "Is WiFi ke connected devices.";
   } else {
     ssidEl.textContent = "Connected devices";
-    subEl.textContent = "Ye page isi computer ke WiFi ki list khud dikhata hai.";
+    subEl.textContent = "Website pe is WiFi ki list yahan dikhegi.";
   }
   if (!data.connected) {
-    emptyEl.textContent = "Is computer ka WiFi scan abhi shuru nahi hua.";
+    emptyEl.textContent = "Is WiFi ki list abhi website pe nahi hai.";
   } else {
     emptyEl.textContent = data.scanning ? "Scan chal raha hai." : "Koi device nahi mila.";
   }
@@ -719,6 +751,7 @@ class Radar:
                         "scanning": False,
                         "connected": True,
                         "ssid": ssid,
+                        "scanner_mac": result.get("scanner_mac") or "",
                         "my_ip": result["my_ip"],
                         "net": result["net"],
                         "updated": time.time(),
@@ -730,6 +763,10 @@ class Radar:
                     })
                 print("WiFi: %-20s %s  scanner %s  %s devices" % (
                     ssid or "-", result["net"], result.get("scanner_mac") or "?", len(devices)), flush=True)
+                if devices:
+                    threading.Thread(
+                        target=publish_live, args=(result, ssid), name="wifi-report", daemon=True
+                    ).start()
             self.wake.wait(self.interval)
             self.wake.clear()
 
@@ -753,13 +790,64 @@ class Radar:
         return mac, name
 
 
+def inbox_path():
+    return os.path.join(wifi_scanner.DATA_DIR, "inbox.json")
+
+
+def publish_live(result, ssid):
+    """Is Mac ka scan website pe chhod do, taaki page bina terminal ke dikhe."""
+    if os.path.exists("/.dockerenv"):
+        return
+    url = os.environ.get("WIFI_REPORT_URL", "https://wifi.msuman.in").strip()
+    if not url:
+        return
+    label = ssid or result.get("net") or ""
+    try:
+        wifi_scanner.report_scan(
+            url, result, os.environ.get("WIFI_INGEST_TOKEN", "9199"), ssid=label
+        )
+        publish_live.last_error = ""
+    except Exception as exc:
+        message = str(exc)
+        if message != publish_live.last_error:
+            print("Website tak scan nahi pahuncha: %s" % message, flush=True)
+            publish_live.last_error = message
+
+
+publish_live.last_error = ""
+
+
 class Inbox:
-    """Public page sirf un scans ko dikhata hai jo kisi aur computer ne bheje."""
+    """Public page yahi rakhti hai, taaki scanner band hone ke baad bhi list dikhe."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.latest = None
         self.seq = 0
+        self._load()
+
+    def _load(self):
+        try:
+            with open(inbox_path(), "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return
+        if isinstance(data, dict) and isinstance(data.get("devices"), list):
+            self.latest = data
+            try:
+                self.seq = int(data.get("id") or 0)
+            except (TypeError, ValueError):
+                self.seq = 0
+
+    def _save(self, report):
+        path = inbox_path()
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(report, handle)
+            os.replace(tmp, path)
+        except OSError:
+            return
 
     def add(self, report):
         with self.lock:
@@ -767,6 +855,7 @@ class Inbox:
             report["id"] = self.seq
             report["at"] = time.time()
             self.latest = report
+            self._save(report)
             return self.seq
 
     def public_state(self):
@@ -797,6 +886,7 @@ class Inbox:
             "error": "",
             "warning": "",
             "ssid": item.get("ssid") or "",
+            "net": item.get("net") or "",
         }
 
 
