@@ -658,11 +658,11 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False, previou
     my_ip = lan_ip()
     net = ipaddress.ip_network(subnet or f"{my_ip}/24", strict=False)
     if net.num_addresses > 1024:
-        raise ValueError("Subnet bahut bada hai, /24 use karo (jaise 192.168.1.0/24).")
+        raise ValueError("Subnet is too large. Use a /24, for example 192.168.1.0/24.")
 
     hosts = [str(h) for h in net.hosts()]
     if announce:
-        print(f"Mera IP: {my_ip}   Scanner MAC: {scanner_mac() or '?'}   Scanning {net} ({len(hosts)} addresses)...")
+        print(f"My IP: {my_ip}   Scanner MAC: {scanner_mac() or '?'}   Scanning {net} ({len(hosts)} addresses)...")
     before = {}
     for row in previous or []:
         ip = str(row.get("ip") or "")
@@ -694,7 +694,7 @@ def scan_once(subnet=None, no_ports=False, online=False, announce=False, previou
         mac = arp.get(ip) or (own_mac if ip == my_ip else "?")
         host, ports = info[ip]
         vendor = vendor_of(mac, online, cache)
-        name = "Ye computer" if ip == my_ip else known.get(mac, "")
+        name = "This computer" if ip == my_ip else known.get(mac, "")
         if not name and mac not in ("?", "-"):
             name = "NEW"
             new_count += 1
@@ -719,7 +719,7 @@ def report_scan(url, result, token, ssid=None):
     """Is computer ka scan deployed website ko bhejo. Server apna LAN nahi bhejta."""
     url = (url or "").strip()
     if not url.startswith(("http://", "https://")):
-        raise ValueError("Report URL http ya https hona chahiye")
+        raise ValueError("Report URL must be http or https")
     if not url.rstrip("/").endswith("/api/ingest"):
         url = url.rstrip("/") + "/api/ingest"
     payload = {
@@ -743,15 +743,15 @@ def report_scan(url, result, token, ssid=None):
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
             if response.status >= 300:
-                raise ValueError("site ne %s diya" % response.status)
+                raise ValueError("site returned %s" % response.status)
     except urllib.error.HTTPError as exc:
         detail = exc.read(240).decode("utf-8", "replace").replace("\n", " ").strip()
-        raise ValueError("site ne %s diya. %s" % (exc.code, detail))
-    print(f"Report gaya: {payload['ssid'] or payload['net']} -> {url}")
+        raise ValueError("site returned %s. %s" % (exc.code, detail))
+    print(f"Report sent: {payload['ssid'] or payload['net']} -> {url}")
 
 
 def print_table(rows):
-    cols = ["IP", "MAC", "Vendor", "Type", "Hostname", "Ports", "Naam"]
+    cols = ["IP", "MAC", "Vendor", "Type", "Hostname", "Ports", "Name"]
     data = [[r["ip"], r["mac"], r["vendor"], r["type"], r["hostname"],
              ",".join(r["ports"]), r["name"]] for r in rows]
     data = [[str(c)[:28] for c in row] for row in data]
@@ -767,17 +767,17 @@ def print_table(rows):
 
 def main():
     ap = argparse.ArgumentParser(description="WiFi network device scanner")
-    ap.add_argument("--subnet", help="jaise 192.168.1.0/24 (default: apne IP ka /24)")
-    ap.add_argument("--no-ports", action="store_true", help="port check skip karo")
-    ap.add_argument("--online", action="store_true", help="unknown vendor internet se dhundho")
-    ap.add_argument("--json", metavar="FILE", help="result JSON file me save karo")
-    ap.add_argument("--name", nargs=2, metavar=("MAC", "NAAM"), help="device ko naam do")
+    ap.add_argument("--subnet", help="for example 192.168.1.0/24 (default: this computer's /24)")
+    ap.add_argument("--no-ports", action="store_true", help="skip the port check")
+    ap.add_argument("--online", action="store_true", help="look up unknown vendors online")
+    ap.add_argument("--json", metavar="FILE", help="save the result as JSON")
+    ap.add_argument("--name", nargs=2, metavar=("MAC", "NAME"), help="set a device name")
     ap.add_argument("--report", default=os.environ.get("WIFI_REPORT_URL", ""),
-                    help="deployed site, jaise https://wifi.msuman.in")
+                    help="deployed site, for example https://wifi.msuman.in")
     ap.add_argument("--token", default=os.environ.get("WIFI_INGEST_TOKEN", "9199"),
                     help="report token")
-    ap.add_argument("--web", action="store_true", help="website: isi computer ke WiFi ki list khud dikhata hai")
-    ap.add_argument("--host", default="0.0.0.0", help="web bind (default 0.0.0.0, usi WiFi ke devices khol sakein)")
+    ap.add_argument("--web", action="store_true", help="website: show the devices on this computer's WiFi")
+    ap.add_argument("--host", default="0.0.0.0", help="web bind address (default 0.0.0.0, so phones on this WiFi can open it)")
     ap.add_argument("--port", type=int, default=8765, help="web port (default 8765)")
     ap.add_argument("--interval", type=int, default=20, help="web rescan seconds (default 20)")
     a = ap.parse_args()
@@ -804,15 +804,15 @@ def main():
 
     print()
     print_table(result["rows"])
-    print(f"\n{len(result['rows'])} devices mile ({result['elapsed']:.1f}s). Naye/bina naam ke: {result['new_count']}")
-    print('Naam dene ke liye: python wifi_scanner.py --name AA:BB:CC:DD:EE:FF "Bedroom ESP32"')
+    print(f"\n{len(result['rows'])} devices found ({result['elapsed']:.1f}s). New or unnamed: {result['new_count']}")
+    print('To name one: python wifi_scanner.py --name AA:BB:CC:DD:EE:FF "Bedroom ESP32"')
 
     print(f"Save: {scanner_folder()}")
     if a.report:
         try:
             report_scan(a.report, result, a.token)
         except Exception as exc:
-            print(f"Report nahi gaya: {exc}")
+            print(f"Report was not sent: {exc}")
     if a.json:
         dest = a.json if os.path.isabs(a.json) else os.path.join(scanner_folder(), os.path.basename(a.json))
         save_json(dest, {"scanner_mac": result["scanner_mac"], "devices": result["rows"]})

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Website: jis WiFi se ye computer abhi juda hai, uske saare connected devices.
+Website: every device connected to the WiFi this computer is on.
 
     python wifi_scanner.py --web
     docker compose up -d --build
 
-Doosre area mein jao, us WiFi se is computer ko jodo, page dubara us network ki list dikhata hai.
-Browser akela aas-paas ke phone nahi dekh sakta — scan isi computer se hota hai.
-Docker tabhi WiFi dekhta hai jab container host network pe ho (Linux).
+Join another WiFi and the page lists that network instead.
+A browser cannot see nearby phones by itself. The scan runs on this computer.
+Docker sees WiFi only when the container uses host networking (Linux).
 """
 import hashlib
 import hmac
@@ -29,11 +29,11 @@ MAC_OK = re.compile(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}")
 UNLOCK_CODE = "9199"
 
 PAGE = """<!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Is WiFi ke devices</title>
+<title>WiFi devices</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -144,8 +144,8 @@ PAGE = """<!DOCTYPE html>
     <form id="gateForm">
       <input id="gateCode" inputmode="numeric" autocomplete="off" aria-label="Code">
       <div class="rowb">
-        <button type="button" id="gateClose">Band</button>
-        <button type="submit" class="primary" id="gateGo">Kholo</button>
+        <button type="button" id="gateClose">Close</button>
+        <button type="submit" class="primary" id="gateGo">Open</button>
       </div>
     </form>
     <p id="gateMsg"></p>
@@ -156,7 +156,7 @@ PAGE = """<!DOCTYPE html>
   <div class="headrow">
     <div>
       <h1 id="ssid">Connected devices</h1>
-      <p class="sub" id="sub">Isi system ka WiFi, devices aur connect/disconnect log.</p>
+      <p class="sub" id="sub">Devices and the connect/disconnect log for this system.</p>
     </div>
     <button type="button" id="logout">Logout</button>
   </div>
@@ -168,18 +168,18 @@ PAGE = """<!DOCTYPE html>
 <div id="wifiView">
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
-  <div id="status">Scan ho raha hai...</div>
+  <div id="status">Scanning...</div>
 </div>
 <div id="err"></div>
 <div id="alert"></div>
 <div class="panel">
   <table>
     <thead>
-      <tr><th>IP</th><th>MAC</th><th>Vendor</th><th>Type</th><th>Hostname</th><th>Ports</th><th>Naam</th></tr>
+      <tr><th>IP</th><th>MAC</th><th>Vendor</th><th>Type</th><th>Hostname</th><th>Ports</th><th>Name</th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
-  <div class="empty" id="empty">Scan chal raha hai.</div>
+  <div class="empty" id="empty">Scanning.</div>
 </div>
 <div class="panel log" id="logPanel">
   <h2>Connect / Disconnect</h2>
@@ -204,7 +204,7 @@ PAGE = """<!DOCTYPE html>
     <h2 id="histTitle">History</h2>
     <p class="sub" id="histSub"></p>
     <div class="rows" id="histRows"></div>
-    <div class="rowb"><button type="button" id="histClose">Band</button></div>
+    <div class="rowb"><button type="button" id="histClose">Close</button></div>
   </div>
 </div>
 <script>
@@ -250,14 +250,15 @@ function render(devices) {
     });
     tr.appendChild(el("td", (d.ports || []).join(",")));
     const nameTd = el("td");
-    if (!d.mac || d.mac === "?" || d.mac === "-" || d.name === "Ye computer") {
-      nameTd.appendChild(el("span", d.name || "", d.name === "NEW" ? "new" : ""));
+    if (!d.mac || d.mac === "?" || d.mac === "-" || d.name === "This computer" || d.name === "Ye computer") {
+      const label = d.name === "Ye computer" ? "This computer" : (d.name || "");
+      nameTd.appendChild(el("span", label, d.name === "NEW" ? "new" : ""));
     } else {
       const box = el("div", null, "namebox");
       const input = document.createElement("input");
       input.value = d.name === "NEW" ? "" : (d.name || "");
-      input.placeholder = d.name === "NEW" ? "NEW" : "naam";
-      input.setAttribute("aria-label", "Device ka naam");
+      input.placeholder = d.name === "NEW" ? "NEW" : "name";
+      input.setAttribute("aria-label", "Device name");
       const btn = el("button", "Save");
       btn.type = "button";
       btn.addEventListener("click", () => saveName(d.mac, input.value));
@@ -289,13 +290,13 @@ function paintChrome(data, heading, sub, emptyWaiting) {
   ssidEl.textContent = heading;
   subEl.textContent = sub;
   if (!devices.length) {
-    emptyEl.textContent = data.scanning ? "Scan chal raha hai." : emptyWaiting;
+    emptyEl.textContent = data.scanning ? "Scanning." : emptyWaiting;
   }
-  if (data.scanning) document.getElementById("status").textContent = "Scan ho raha hai...";
-  else if (!data.updated) document.getElementById("status").textContent = "Scan ka intezar";
+  if (data.scanning) document.getElementById("status").textContent = "Scanning...";
+  else if (!data.updated) document.getElementById("status").textContent = "Waiting for a scan";
   else {
     const ago = Math.max(0, Math.round(Date.now() / 1000 - data.updated));
-    document.getElementById("status").textContent = "Aakhri scan " + ago + "s pehle";
+    document.getElementById("status").textContent = "Last scan " + ago + "s ago";
   }
   render(devices);
   renderLog(data.events || []);
@@ -328,7 +329,7 @@ function showHistory(mac) {
   const want = String(mac || "").toUpperCase();
   const rows = historyEvents.filter((ev) => String(ev.mac || "").toUpperCase() === want);
   document.getElementById("histTitle").textContent = mac;
-  document.getElementById("histSub").textContent = rows.length ? (rows.length + " events") : "Is MAC ki history abhi nahi hai.";
+  document.getElementById("histSub").textContent = rows.length ? (rows.length + " events") : "No history for this MAC yet.";
   const box = document.getElementById("histRows");
   box.textContent = "";
   rows.forEach((ev) => box.appendChild(logLine(ev, false)));
@@ -343,7 +344,7 @@ function renderLog(events) {
   logKey = key;
   box.textContent = "";
   if (!historyEvents.length) {
-    box.appendChild(el("div", "Abhi koi connect ya disconnect nahi hua."));
+    box.appendChild(el("div", "No connect or disconnect yet."));
     return;
   }
   historyEvents.forEach((ev) => {
@@ -358,8 +359,8 @@ function renderLog(events) {
 
 function paintPublic(data) {
   const title = data.ssid || data.net || "WiFi";
-  const sub = title === "WiFi" ? "Isi system ka scan abhi shuru ho raha hai." : "Isi system ke connected devices.";
-  paintChrome(data, title, sub, "Isi system ka scan abhi shuru ho raha hai.");
+  const sub = title === "WiFi" ? "The scan on this system is starting." : "Devices connected to this system.";
+  paintChrome(data, title, sub, "The scan on this system is starting.");
 }
 
 function paintInternal() {
@@ -372,7 +373,7 @@ function paintInternal() {
     updated: data.updated,
     error: "",
     warning: ""
-  }, "Internal", data.ssid || "Deploy system ke connected devices.", "Is system ka scan abhi nahi aaya.");
+  }, "Internal", data.ssid || "Devices on the deploy system.", "No scan from this system yet.");
 }
 
 function showView(next) {
@@ -384,7 +385,7 @@ function showView(next) {
   if (view === "wifi" && publicData) paintPublic(publicData);
   if (view === "system") {
     ssidEl.textContent = "System";
-    subEl.textContent = "Isi system ki battery.";
+    subEl.textContent = "Battery on this system.";
     loadBattery();
   }
 }
@@ -398,7 +399,7 @@ function paintBattery(data) {
   fill.className = "";
   if (!data || !data.present) {
     pctEl.textContent = "—";
-    statusEl.textContent = "Is system pe battery nahi hai.";
+    statusEl.textContent = "This system has no battery.";
     sourceEl.textContent = data && data.source === "AC" ? "AC power" : "";
     remainEl.textContent = "";
     fill.style.width = "0";
@@ -408,7 +409,7 @@ function paintBattery(data) {
   pctEl.textContent = pct + "%";
   statusEl.textContent = data.status || "";
   sourceEl.textContent = data.source === "AC" ? "AC power" : (data.source === "Battery" ? "Battery" : "");
-  remainEl.textContent = data.remaining ? (data.remaining + " baaki") : "";
+  remainEl.textContent = data.remaining ? (data.remaining + " left") : "";
   fill.style.width = pct + "%";
   if (data.status === "Charging") fill.className = "charge";
   else if (pct <= 20) fill.className = "low";
@@ -486,7 +487,7 @@ async function tick() {
     if (res.status === 401) { location.replace("/"); return; }
     data = await res.json();
   } catch (e) {
-    if (view === "wifi") document.getElementById("status").textContent = "Server se connection nahi";
+    if (view === "wifi") document.getElementById("status").textContent = "Cannot reach the server";
     return;
   }
   publicData = data;
@@ -494,7 +495,7 @@ async function tick() {
   else loadBattery();
   if (typeof data.generation === "number" && data.generation !== seenGen) {
     if (seenGen !== -1 && data.connected) {
-      alertEl.textContent = "List update ho gayi. Devices: " + (data.devices || []).length;
+      alertEl.textContent = "List updated. Devices: " + (data.devices || []).length;
       alertEl.classList.add("show");
     }
     seenGen = data.generation;
@@ -553,7 +554,7 @@ document.getElementById("logout").addEventListener("click", async () => {
 
 gateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  gateMsg.textContent = "List la rahe hain...";
+  gateMsg.textContent = "Loading...";
   gateList.textContent = "";
   document.getElementById("gateGo").disabled = true;
   try {
@@ -564,13 +565,13 @@ gateForm.addEventListener("submit", async (event) => {
     });
     const data = await res.json();
     if (!res.ok) {
-      gateMsg.textContent = "Galat code";
+      gateMsg.textContent = "Wrong code";
       return;
     }
     gateMsg.textContent = "";
     closeGate();
   } catch (e) {
-    gateMsg.textContent = "Server se connection nahi";
+    gateMsg.textContent = "Cannot reach the server";
   } finally {
     document.getElementById("gateGo").disabled = false;
   }
@@ -748,7 +749,7 @@ def docker_bridge_warning(ip):
     bridges = (ipaddress.ip_network("172.17.0.0/16"), ipaddress.ip_network("172.18.0.0/16"),
                ipaddress.ip_network("192.168.65.0/24"))
     if any(addr in net for net in bridges):
-        return "Docker bridge pe hai, is WiFi ke devices nahi milenge. Linux pe chalao: docker compose up -d --build"
+        return "Docker is on a bridge network, so this WiFi's devices will not appear. On Linux run: docker compose up -d --build"
     return ""
 
 
@@ -1270,7 +1271,7 @@ class Radar:
                 "type": prev.get("type") or "",
                 "hostname": prev.get("hostname") or "",
                 "ports": prev.get("ports") or [],
-                "name": prev.get("name") or ("Ye computer" if ip == my_ip else "NEW"),
+                "name": prev.get("name") or ("This computer" if ip == my_ip else "NEW"),
                 "color": i % 7,
             })
         return rows
@@ -1298,10 +1299,10 @@ class Radar:
     def set_name(self, mac, name):
         mac = wifi_scanner.norm_mac(mac)
         if not MAC_OK.fullmatch(mac):
-            raise ValueError("MAC galat hai")
+            raise ValueError("Invalid MAC")
         name = " ".join(str(name).split())
         if len(name) > 40:
-            raise ValueError("Naam 40 akshar se chhota rakho")
+            raise ValueError("Name must be 40 characters or less")
         known = wifi_scanner.load_store("known_devices")
         if name:
             known[mac] = name
@@ -1310,7 +1311,7 @@ class Radar:
         wifi_scanner.save_store("known_devices", known)
         with self.lock:
             for device in self.state["devices"]:
-                if device.get("mac") == mac and device.get("name") != "Ye computer":
+                if device.get("mac") == mac and device.get("name") not in ("Ye computer", "This computer"):
                     device["name"] = name or "NEW"
         return mac, name
 
@@ -1335,7 +1336,7 @@ def publish_live(result, ssid):
     except Exception as exc:
         message = str(exc)
         if message != publish_live.last_error:
-            print("Website tak scan nahi pahuncha: %s" % message, flush=True)
+            print("Scan did not reach the website: %s" % message, flush=True)
             publish_live.last_error = message
 
 
@@ -1424,10 +1425,10 @@ class Inbox:
 def clean_report(data):
     mac = wifi_scanner.norm_mac(str(data.get("scanner_mac") or ""))
     if not MAC_OK.fullmatch(mac):
-        raise ValueError("Scanner MAC galat hai")
+        raise ValueError("Invalid scanner MAC")
     raw_rows = data.get("devices")
     if not isinstance(raw_rows, list):
-        raise ValueError("Devices list honi chahiye")
+        raise ValueError("Devices must be a list")
     devices = []
     for row in raw_rows[:400]:
         if not isinstance(row, dict):
@@ -1466,7 +1467,7 @@ def public_mode():
 
 
 LOGIN_PAGE = """<!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1499,12 +1500,12 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <body>
 <form id="login">
   <h1>Login</h1>
-  <p>Sirf admin data dekh sakta hai.</p>
+  <p>Only the admin can see this data.</p>
   <label for="user">User</label>
   <input id="user" name="user" autocomplete="username" value="admin" required>
   <label for="password">Password</label>
   <input id="password" name="password" type="password" autocomplete="current-password" required>
-  <button type="submit">Kholo</button>
+  <button type="submit">Sign in</button>
   <p id="msg"></p>
 </form>
 <script>
@@ -1521,7 +1522,7 @@ document.getElementById("login").addEventListener("submit", async (event) => {
     })
   });
   if (res.ok) location.replace("/");
-  else msg.textContent = "Galat user ya password";
+  else msg.textContent = "Wrong user or password";
 });
 </script>
 </body>
@@ -1785,7 +1786,7 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, online=False):
     port = int(port)
     if not 1 <= port <= 65535:
-        raise SystemExit("Port 1 se 65535 ke beech hona chahiye.")
+        raise SystemExit("Port must be between 1 and 65535.")
     host = (host or "0.0.0.0").strip()
     radar = Radar(subnet, no_ports, online, interval)
     user, password, secret, created = load_admin()
@@ -1799,27 +1800,27 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
     except OSError as exc:
-        raise SystemExit("Port %s pe server nahi chala: %s" % (port, exc))
+        raise SystemExit("Server did not start on port %s: %s" % (port, exc))
     lan = wifi_scanner.local_ip()
-    print("Website chalu.", flush=True)
-    print("Isi computer pe: http://127.0.0.1:%s" % port, flush=True)
+    print("Website is running.", flush=True)
+    print("On this computer: http://127.0.0.1:%s" % port, flush=True)
     if not lan.startswith("127."):
-        print("Usi WiFi ke phone se: http://%s:%s" % (lan, port), flush=True)
-    print("Page isi system ka WiFi, devices aur log dikhata hai.", flush=True)
+        print("From a phone on this WiFi: http://%s:%s" % (lan, port), flush=True)
+    print("The page shows this system's WiFi, devices, and log.", flush=True)
     print("Login user: %s" % user, flush=True)
     if os.environ.get("WIFI_ADMIN_PASSWORD", "").strip():
-        print("Password WIFI_ADMIN_PASSWORD se set hai.", flush=True)
+        print("Password comes from WIFI_ADMIN_PASSWORD.", flush=True)
     elif created:
         print("Admin password: %s" % password, flush=True)
-        print("Yahi password save hai: %s" % os.path.join(wifi_scanner.DATA_DIR, "admin_password"), flush=True)
+        print("Saved in: %s" % os.path.join(wifi_scanner.DATA_DIR, "admin_password"), flush=True)
     else:
         print("Password file: %s" % os.path.join(wifi_scanner.DATA_DIR, "admin_password"), flush=True)
-    print("Ctrl+C se band.", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
     if os.path.exists("/.dockerenv"):
-        print("Docker ke andar. Devices tabhi dikhenge jab network host ho.", flush=True)
+        print("Running in Docker. Devices appear only with host networking.", flush=True)
 
     def stop(signum, _frame):
-        print("\nBand ho raha hai.", flush=True)
+        print("\nStopping.", flush=True)
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, stop)
