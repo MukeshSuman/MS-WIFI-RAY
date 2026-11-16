@@ -1737,7 +1737,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ingest":
             expected = os.environ.get("WIFI_INGEST_TOKEN") or UNLOCK_CODE
             got = str(data.get("token") or "").strip().encode("utf-8")
-            import hmac
             if not hmac.compare_digest(got, expected.encode("utf-8")):
                 self._send(401, "application/json; charset=utf-8", b'{"ok":false}')
                 return
