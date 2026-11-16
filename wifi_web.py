@@ -9,10 +9,13 @@ Doosre area mein jao, us WiFi se is computer ko jodo, page dubara us network ki 
 Browser akela aas-paas ke phone nahi dekh sakta — scan isi computer se hota hai.
 Docker tabhi WiFi dekhta hai jab container host network pe ho (Linux).
 """
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import threading
@@ -36,6 +39,7 @@ PAGE = """<!DOCTYPE html>
   * { box-sizing: border-box; }
   body { margin: 0; background: #121611; color: #e7f0df; font: 16px/1.4 ui-sans-serif, system-ui, sans-serif; }
   header, .wrap { padding: 18px; }
+  .headrow { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
   h1 { margin: 0; font-size: 28px; line-height: 1.15; }
   .sub { color: #9aa892; margin: 6px 0 0; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
@@ -119,9 +123,17 @@ PAGE = """<!DOCTYPE html>
   .wifi span, .iface { color: #9aa892; font-size: 14px; }
   .iface { padding: 4px 0; }
   .on { color: #d6ff6a; }
-  #tabs { display: none; gap: 8px; padding: 14px 18px 0; }
-  #tabs.show { display: flex; }
+  #tabs { display: flex; gap: 8px; padding: 14px 18px 0; }
   button.tab.on { background: #31461c; border-color: #6d8f32; color: #d6ff6a; }
+  #wifiView[hidden], #systemView[hidden] { display: none; }
+  .battery { padding: 22px; }
+  .batt-top { display: flex; align-items: center; gap: 18px; }
+  .batt-pct { font-size: 64px; line-height: 1; font-weight: 700; }
+  .batt-bar { height: 12px; margin-top: 18px; background: #121611; border-radius: 99px; overflow: hidden; }
+  #battFill { height: 100%; width: 0; background: #6d8f32; }
+  #battFill.low { background: #ff8b8b; }
+  #battFill.mid { background: #f0d060; }
+  #battFill.charge { background: #5ddea0; }
 </style>
 </head>
 <body>
@@ -141,13 +153,19 @@ PAGE = """<!DOCTYPE html>
   </div>
 </div>
 <header>
-  <h1 id="ssid">Connected devices</h1>
-  <p class="sub" id="sub">Website pe is WiFi ki list yahan dikhegi.</p>
+  <div class="headrow">
+    <div>
+      <h1 id="ssid">Connected devices</h1>
+      <p class="sub" id="sub">Isi system ka WiFi, devices aur connect/disconnect log.</p>
+    </div>
+    <button type="button" id="logout">Logout</button>
+  </div>
 </header>
 <div id="tabs">
   <button type="button" id="tabWifi" class="tab on">WiFi</button>
-  <button type="button" id="tabInternal" class="tab">Internal</button>
+  <button type="button" id="tabSystem" class="tab">System</button>
 </div>
+<div id="wifiView">
 <div class="meta">
   <div>Devices <b id="count">0</b></div>
   <div id="status">Scan ho raha hai...</div>
@@ -167,6 +185,20 @@ PAGE = """<!DOCTYPE html>
   <h2>Connect / Disconnect</h2>
   <div class="rows" id="log"></div>
 </div>
+</div>
+<div id="systemView" hidden>
+  <div class="panel battery">
+    <div class="batt-top">
+      <div class="batt-pct" id="battPct">—</div>
+      <div>
+        <div id="battStatus" class="batt-status"></div>
+        <div id="battSource" class="sub"></div>
+        <div id="battRemain" class="sub"></div>
+      </div>
+    </div>
+    <div class="batt-bar"><div id="battFill"></div></div>
+  </div>
+</div>
 <div id="hist">
   <div class="sheet wide">
     <h2 id="histTitle">History</h2>
@@ -185,7 +217,7 @@ let tableKey = "";
 let seenGen = -1;
 let stateFrom = "";
 let postedAt = 0;
-let view = "public";
+let view = "wifi";
 let unlockCode = "";
 let internalData = null;
 let publicData = null;
@@ -326,9 +358,8 @@ function renderLog(events) {
 
 function paintPublic(data) {
   const title = data.ssid || data.net || "WiFi";
-  document.getElementById("tabWifi").textContent = title;
-  const sub = title === "WiFi" ? "Website pe is WiFi ki list yahan dikhegi." : "Is WiFi ke connected devices.";
-  paintChrome(data, title, sub, "Is WiFi ki list abhi website pe nahi hai.");
+  const sub = title === "WiFi" ? "Isi system ka scan abhi shuru ho raha hai." : "Isi system ke connected devices.";
+  paintChrome(data, title, sub, "Isi system ka scan abhi shuru ho raha hai.");
 }
 
 function paintInternal() {
@@ -346,12 +377,52 @@ function paintInternal() {
 
 function showView(next) {
   view = next;
-  tableKey = "";
-  logKey = "";
-  document.getElementById("tabWifi").classList.toggle("on", view === "public");
-  document.getElementById("tabInternal").classList.toggle("on", view === "internal");
-  if (view === "internal") paintInternal();
-  else if (publicData) paintPublic(publicData);
+  document.getElementById("tabWifi").classList.toggle("on", view === "wifi");
+  document.getElementById("tabSystem").classList.toggle("on", view === "system");
+  document.getElementById("wifiView").hidden = view !== "wifi";
+  document.getElementById("systemView").hidden = view !== "system";
+  if (view === "wifi" && publicData) paintPublic(publicData);
+  if (view === "system") {
+    ssidEl.textContent = "System";
+    subEl.textContent = "Isi system ki battery.";
+    loadBattery();
+  }
+}
+
+function paintBattery(data) {
+  const pctEl = document.getElementById("battPct");
+  const fill = document.getElementById("battFill");
+  const statusEl = document.getElementById("battStatus");
+  const sourceEl = document.getElementById("battSource");
+  const remainEl = document.getElementById("battRemain");
+  fill.className = "";
+  if (!data || !data.present) {
+    pctEl.textContent = "—";
+    statusEl.textContent = "Is system pe battery nahi hai.";
+    sourceEl.textContent = data && data.source === "AC" ? "AC power" : "";
+    remainEl.textContent = "";
+    fill.style.width = "0";
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, Number(data.percent) || 0));
+  pctEl.textContent = pct + "%";
+  statusEl.textContent = data.status || "";
+  sourceEl.textContent = data.source === "AC" ? "AC power" : (data.source === "Battery" ? "Battery" : "");
+  remainEl.textContent = data.remaining ? (data.remaining + " baaki") : "";
+  fill.style.width = pct + "%";
+  if (data.status === "Charging") fill.className = "charge";
+  else if (pct <= 20) fill.className = "low";
+  else if (pct <= 50) fill.className = "mid";
+}
+
+async function loadBattery() {
+  try {
+    const res = await fetch("/api/battery");
+    if (res.status === 401) { location.replace("/"); return; }
+    paintBattery(await res.json());
+  } catch (e) {
+    paintBattery({ present: false });
+  }
 }
 
 async function refreshInternal() {
@@ -410,32 +481,24 @@ async function publish(data) {
 async function tick() {
   let data;
   stateFrom = "";
-  let remote = null;
   try {
-    remote = await (await fetch("/api/state")).json();
+    const res = await fetch("/api/state");
+    if (res.status === 401) { location.replace("/"); return; }
+    data = await res.json();
   } catch (e) {
-    document.getElementById("status").textContent = "Server se connection nahi";
+    if (view === "wifi") document.getElementById("status").textContent = "Server se connection nahi";
     return;
   }
-  const local = await localState();
-  if (local && (local.devices || []).length) {
-    data = local;
-    stateFrom = "http://127.0.0.1:8765/api/name";
-    publish(local);
-  } else {
-    data = remote;
-  }
   publicData = data;
-  if (view === "public") paintPublic(data);
-  else document.getElementById("tabWifi").textContent = data.ssid || data.net || "WiFi";
+  if (view === "wifi") paintPublic(data);
+  else loadBattery();
   if (typeof data.generation === "number" && data.generation !== seenGen) {
-    if (seenGen !== -1 && data.connected && view === "public") {
+    if (seenGen !== -1 && data.connected) {
       alertEl.textContent = "List update ho gayi. Devices: " + (data.devices || []).length;
       alertEl.classList.add("show");
     }
     seenGen = data.generation;
   }
-  if (unlockCode) refreshInternal();
 }
 
 const gate = document.getElementById("gate");
@@ -481,9 +544,12 @@ document.getElementById("hist").addEventListener("click", (event) => {
   if (event.target.id === "hist") document.getElementById("hist").classList.remove("show");
 });
 gate.addEventListener("click", (event) => { if (event.target === gate) closeGate(); });
-
-document.getElementById("tabWifi").addEventListener("click", () => showView("public"));
-document.getElementById("tabInternal").addEventListener("click", () => showView("internal"));
+document.getElementById("tabWifi").addEventListener("click", () => showView("wifi"));
+document.getElementById("tabSystem").addEventListener("click", () => showView("system"));
+document.getElementById("logout").addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST" });
+  location.replace("/");
+});
 
 gateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -502,11 +568,7 @@ gateForm.addEventListener("submit", async (event) => {
       return;
     }
     gateMsg.textContent = "";
-    unlockCode = gateCode.value;
-    internalData = data;
-    document.getElementById("tabs").classList.add("show");
     closeGate();
-    showView("internal");
   } catch (e) {
     gateMsg.textContent = "Server se connection nahi";
   } finally {
@@ -539,6 +601,121 @@ def wifi_name():
     except Exception:
         return ""
     return ""
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except Exception:
+        return ""
+
+
+def _battery_payload(percent, status, source, remaining):
+    return {
+        "present": percent is not None,
+        "percent": percent,
+        "status": status or "",
+        "source": source or "",
+        "remaining": remaining or "",
+    }
+
+
+def darwin_battery():
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return _battery_payload(None, "", "", "")
+    source = "AC" if "AC Power" in out else ("Battery" if "Battery Power" in out else "")
+    percent, status, remaining = None, "", ""
+    for line in out.splitlines():
+        match = re.search(r"(\d+)\s*%", line)
+        if not match:
+            continue
+        percent = int(match.group(1))
+        low = line.lower()
+        if "discharging" in low:
+            status = "Discharging"
+        elif "charging" in low:
+            status = "Charging"
+        elif "charged" in low or "finishing" in low:
+            status = "Full"
+        clock = re.search(r"(\d+:\d+)", line)
+        if clock and clock.group(1) != "0:00":
+            remaining = clock.group(1)
+    return _battery_payload(percent, status, source, remaining)
+
+
+def linux_battery():
+    root = "/sys/class/power_supply"
+    if not os.path.isdir(root):
+        return _battery_payload(None, "", "", "")
+    chosen = None
+    source = ""
+    for name in sorted(os.listdir(root)):
+        base = os.path.join(root, name)
+        kind = _read_text(os.path.join(base, "type"))
+        if kind in ("Mains", "USB") and _read_text(os.path.join(base, "online")) == "1":
+            source = "AC"
+        if kind != "Battery":
+            continue
+        cap = _read_text(os.path.join(base, "capacity"))
+        if not cap.isdigit():
+            continue
+        status_raw = _read_text(os.path.join(base, "status"))
+        status = {
+            "Charging": "Charging",
+            "Discharging": "Discharging",
+            "Full": "Full",
+            "Not charging": "Full",
+        }.get(status_raw, status_raw)
+        energy = _read_text(os.path.join(base, "energy_now")) or _read_text(os.path.join(base, "charge_now"))
+        power = _read_text(os.path.join(base, "power_now")) or _read_text(os.path.join(base, "current_now"))
+        remaining = ""
+        try:
+            if energy and power and float(power) > 0 and status == "Discharging":
+                minutes = int(float(energy) / float(power) * 60)
+                remaining = "%d:%02d" % (minutes // 60, minutes % 60)
+        except ValueError:
+            remaining = ""
+        chosen = _battery_payload(int(cap), status, source or ("Battery" if status == "Discharging" else "AC"), remaining)
+    return chosen or _battery_payload(None, "", source, "")
+
+
+def windows_battery():
+    script = (
+        "(Get-CimInstance Win32_Battery | "
+        "Select-Object -First 1 EstimatedChargeRemaining,BatteryStatus | ConvertTo-Json)"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=8,
+        ).stdout
+        data = json.loads(out) if out.strip() else None
+    except Exception:
+        data = None
+    if not isinstance(data, dict) or data.get("EstimatedChargeRemaining") is None:
+        return _battery_payload(None, "", "", "")
+    code = int(data.get("BatteryStatus") or 0)
+    status = {1: "Discharging", 2: "Full", 3: "Full", 6: "Charging", 7: "Charging"}.get(code, "")
+    source = "Battery" if status == "Discharging" else "AC"
+    return _battery_payload(int(data["EstimatedChargeRemaining"]), status, source, "")
+
+
+def battery_info():
+    """Jis system pe ye server chal raha hai, uski battery."""
+    system = wifi_scanner.SYSTEM
+    try:
+        if system == "Darwin":
+            return darwin_battery()
+        if system == "Linux":
+            return linux_battery()
+        if system == "Windows":
+            return windows_battery()
+    except Exception:
+        pass
+    return _battery_payload(None, "", "", "")
 
 
 def linux_ssid():
@@ -1288,10 +1465,158 @@ def public_mode():
     return "live"
 
 
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #121611; color: #e7f0df; font: 16px/1.4 ui-sans-serif, system-ui, sans-serif;
+  }
+  form {
+    width: min(360px, calc(100% - 32px)); background: #1b2119;
+    border: 1px solid #3d4d38; border-radius: 14px; padding: 22px;
+  }
+  h1 { margin: 0 0 6px; font-size: 26px; }
+  p { margin: 0 0 16px; color: #9aa892; }
+  label { display: block; margin: 10px 0 4px; color: #9aa892; font-size: 13px; }
+  input {
+    width: 100%; background: #121611; color: #e7f0df;
+    border: 1px solid #3d4d38; border-radius: 8px; padding: 8px 10px; font: inherit;
+  }
+  button {
+    margin-top: 16px; width: 100%; background: #31461c; color: #d6ff6a;
+    border: 1px solid #6d8f32; border-radius: 8px; padding: 10px 12px; font: inherit; cursor: pointer;
+  }
+  #msg { min-height: 1.2em; margin: 10px 0 0; color: #ff8b8b; }
+</style>
+</head>
+<body>
+<form id="login">
+  <h1>Login</h1>
+  <p>Sirf admin data dekh sakta hai.</p>
+  <label for="user">User</label>
+  <input id="user" name="user" autocomplete="username" value="admin" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">Kholo</button>
+  <p id="msg"></p>
+</form>
+<script>
+document.getElementById("login").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const msg = document.getElementById("msg");
+  msg.textContent = "";
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user: document.getElementById("user").value,
+      password: document.getElementById("password").value
+    })
+  });
+  if (res.ok) location.replace("/");
+  else msg.textContent = "Galat user ya password";
+});
+</script>
+</body>
+</html>
+"""
+
+SESSION_SECONDS = 7 * 24 * 3600
+_login_lock = threading.Lock()
+_login_fails = {}
+
+
+def _secret_file(name, maker):
+    folder = wifi_scanner.DATA_DIR
+    path = os.path.join(folder, name)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            saved = handle.read().strip()
+        if saved:
+            return saved, False
+    except Exception:
+        pass
+    value = maker()
+    try:
+        os.makedirs(folder, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+    except Exception:
+        pass
+    return value, True
+
+
+def load_admin():
+    user = (os.environ.get("WIFI_ADMIN_USER") or "admin").strip() or "admin"
+    env_pass = (os.environ.get("WIFI_ADMIN_PASSWORD") or "").strip()
+    if env_pass:
+        password, created = env_pass, False
+    else:
+        password, created = _secret_file("admin_password", lambda: secrets.token_urlsafe(9))
+    secret, _ = _secret_file("session_secret", lambda: secrets.token_hex(32))
+    return user, password, secret.encode("utf-8"), created
+
+
+def make_session(secret):
+    exp = int(time.time()) + SESSION_SECONDS
+    msg = str(exp).encode("utf-8")
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    return "%s.%s" % (exp, sig)
+
+
+def session_ok(token, secret):
+    try:
+        exp_s, sig = str(token).split(".", 1)
+        exp = int(exp_s)
+    except Exception:
+        return False
+    if exp < time.time() or exp > time.time() + SESSION_SECONDS + 60:
+        return False
+    good = hmac.new(secret, exp_s.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, good)
+
+
+def login_blocked(ip):
+    with _login_lock:
+        item = _login_fails.get(ip)
+        if not item:
+            return False
+        count, until = item
+        if until and time.time() < until:
+            return True
+        if until and time.time() >= until:
+            _login_fails.pop(ip, None)
+        return False
+
+
+def login_failed(ip):
+    with _login_lock:
+        count, _until = _login_fails.get(ip, (0, 0))
+        count += 1
+        until = time.time() + 60 if count >= 8 else 0
+        _login_fails[ip] = (count, until)
+
+
+def login_ok(ip):
+    with _login_lock:
+        _login_fails.pop(ip, None)
+
+
 class Handler(BaseHTTPRequestHandler):
     radar = None
     inbox = None
     public_mode = "live"
+    admin_user = "admin"
+    admin_password = ""
+    session_secret = b""
 
     def log_message(self, fmt, *args):
         return
@@ -1304,15 +1629,42 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Private-Network", "true")
 
-    def _send(self, code, content_type, body):
+    def _send(self, code, content_type, body, set_cookie="", clear_cookie=False):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if set_cookie:
+            self.send_header(
+                "Set-Cookie",
+                "sid=%s; HttpOnly; SameSite=Lax; Path=/; Max-Age=%d" % (set_cookie, SESSION_SECONDS),
+            )
+        if clear_cookie:
+            self.send_header("Set-Cookie", "sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
         self._cors()
         self.end_headers()
         self.wfile.write(data)
+
+    def _client_ip(self):
+        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if forwarded:
+            return forwarded[:64]
+        return self.client_address[0]
+
+    def logged_in(self):
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            part = part.strip()
+            if part.startswith("sid="):
+                return session_ok(part[4:], self.session_secret)
+        return False
+
+    def _require_login(self):
+        if self.logged_in():
+            return True
+        self._send(401, "application/json; charset=utf-8", b'{"ok":false}')
+        return False
 
     def _json_body(self, limit=4096):
         try:
@@ -1341,24 +1693,47 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
-            self._send(200, "text/html; charset=utf-8", PAGE)
-        elif path == "/api/health":
+            page = PAGE if self.logged_in() else LOGIN_PAGE
+            self._send(200, "text/html; charset=utf-8", page)
+            return
+        if path == "/api/health":
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
-        elif path == "/api/state":
-            if self.public_mode == "live":
-                state = self.radar.snapshot()
-            else:
-                state = self.inbox.public_state()
-            self._send(200, "application/json; charset=utf-8", json.dumps(state))
-        elif path == "/favicon.ico":
+            return
+        if path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
+            return
+        if not self._require_login():
+            return
+        if path == "/api/state":
+            self._send(200, "application/json; charset=utf-8", json.dumps(self.radar.snapshot()))
+        elif path == "/api/battery":
+            self._send(200, "application/json; charset=utf-8", json.dumps(battery_info()))
         else:
             self.send_error(404)
 
     def do_POST(self):
         path = urlparse(self.path).path
         data = self._json_body(500000 if path == "/api/ingest" else 4096) or {}
+        if path == "/api/login":
+            ip = self._client_ip()
+            if login_blocked(ip):
+                self._send(429, "application/json; charset=utf-8", b'{"ok":false}')
+                return
+            user = str(data.get("user") or "").strip()
+            password = str(data.get("password") or "")
+            user_ok = hmac.compare_digest(user.encode("utf-8"), self.admin_user.encode("utf-8"))
+            pass_ok = hmac.compare_digest(password.encode("utf-8"), self.admin_password.encode("utf-8"))
+            if not (user_ok and pass_ok):
+                login_failed(ip)
+                self._send(401, "application/json; charset=utf-8", b'{"ok":false}')
+                return
+            login_ok(ip)
+            self._send(200, "application/json; charset=utf-8", b'{"ok":true}', set_cookie=make_session(self.session_secret))
+            return
+        if path == "/api/logout":
+            self._send(200, "application/json; charset=utf-8", b'{"ok":true}', clear_cookie=True)
+            return
         if path == "/api/ingest":
             expected = os.environ.get("WIFI_INGEST_TOKEN") or UNLOCK_CODE
             got = str(data.get("token") or "").strip().encode("utf-8")
@@ -1375,6 +1750,8 @@ class Handler(BaseHTTPRequestHandler):
             print("REPORT  %-18s %-20s %s devices" % (
                 report["scanner_mac"], report["ssid"] or "-", len(report["devices"])), flush=True)
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
+            return
+        if not self._require_login():
             return
         if path == "/api/scan":
             self.radar.kick()
@@ -1412,9 +1789,13 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
         raise SystemExit("Port 1 se 65535 ke beech hona chahiye.")
     host = (host or "0.0.0.0").strip()
     radar = Radar(subnet, no_ports, online, interval)
+    user, password, secret, created = load_admin()
     Handler.radar = radar
     Handler.inbox = Inbox()
     Handler.public_mode = public_mode()
+    Handler.admin_user = user
+    Handler.admin_password = password
+    Handler.session_secret = secret
     threading.Thread(target=radar.loop, name="wifi-scan", daemon=True).start()
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
@@ -1425,10 +1806,15 @@ def serve(host="0.0.0.0", port=8765, interval=20, subnet=None, no_ports=False, o
     print("Isi computer pe: http://127.0.0.1:%s" % port, flush=True)
     if not lan.startswith("127."):
         print("Usi WiFi ke phone se: http://%s:%s" % (lan, port), flush=True)
-    if Handler.public_mode == "live":
-        print("Page isi computer ke WiFi ki list khud dikhata hai.", flush=True)
+    print("Page isi system ka WiFi, devices aur log dikhata hai.", flush=True)
+    print("Login user: %s" % user, flush=True)
+    if os.environ.get("WIFI_ADMIN_PASSWORD", "").strip():
+        print("Password WIFI_ADMIN_PASSWORD se set hai.", flush=True)
+    elif created:
+        print("Admin password: %s" % password, flush=True)
+        print("Yahi password save hai: %s" % os.path.join(wifi_scanner.DATA_DIR, "admin_password"), flush=True)
     else:
-        print("Deploy host ki list public page pe nahi. Circle aur code ke baad milti hai.", flush=True)
+        print("Password file: %s" % os.path.join(wifi_scanner.DATA_DIR, "admin_password"), flush=True)
     print("Ctrl+C se band.", flush=True)
     if os.path.exists("/.dockerenv"):
         print("Docker ke andar. Devices tabhi dikhenge jab network host ho.", flush=True)
